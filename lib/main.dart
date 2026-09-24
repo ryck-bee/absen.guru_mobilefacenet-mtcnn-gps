@@ -1,3 +1,4 @@
+import 'package:absensi_wajah/services/monotonic_clock.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -24,6 +25,9 @@ Future<void> main() async {
   };
 
   debugPrint("=== App started ===");
+
+  final up = await MonotonicClock.elapsedRealtimeMs();
+  debugPrint("TEST MONOTONIC: uptime = $up ms");
 
   // 3a. Init Supabase
   try {

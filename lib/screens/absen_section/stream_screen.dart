@@ -29,6 +29,13 @@ class StreamScreen extends StatefulWidget {
   State<StreamScreen> createState() => _StreamScreenState();
 }
 
+class _AttemptOutcome {
+  final GpsResult? fix;
+  final double? distance;
+  final String result; // 'success' | 'invalid_accuracy' | 'out_of_radius' | 'timeout'
+  _AttemptOutcome({this.fix, this.distance, required this.result});
+}
+
 class _StreamScreenState extends State<StreamScreen> {
   CameraController? _controller;
   DateTime _lastProcessTime = DateTime.now();
@@ -632,16 +639,14 @@ class _StreamScreenState extends State<StreamScreen> {
   // ============================================================
   // GPS PROCESSING (setelah wajah match)
   // ============================================================
-  Future<void> _processGps() async {
+    Future<void> _processGps() async {
     _isProcessingGps = true;
-
-    // Wakelock tetap nyala selama GPS
     await WakelockPlus.enable();
     debugPrint("WAKELOCK: enabled (GPS start)");
 
     if (mounted) {
       setState(() {
-        _statusMessage = "Wajah Valid ✅\nMencari GPS...";
+        _statusMessage = "Wajah Valid ✅\nCek lokasi GPS...";
         _statusColor = Colors.orangeAccent;
       });
     }
@@ -649,7 +654,7 @@ class _StreamScreenState extends State<StreamScreen> {
     try {
       final now = DateTime.now();
       if (!_debugSkipTimeCheck && _isAbsenTutup(now)) {
-        debugPrint("STREAM: absen tutup (jam ${_jamAbsenTutup}:${_menitAbsenTutup})");
+        debugPrint("STREAM: absen tutup");
         await _finishSession(finalStatus: 'expired');
         if (mounted) {
           setState(() {
@@ -673,144 +678,211 @@ class _StreamScreenState extends State<StreamScreen> {
 
       _gpsStartAt = DateTime.now();
 
-      GpsResult? successGps;
-      double? successDistance;
+      bool useSatellite = false;
+      bool hasLocked = false;
+      GpsResult? bestFix;
+      double? bestDistance;
       String lastResult = 'timeout';
-      int totalGpsMs = 0;
 
-      // 3x percobaan GPS
-      for (int i = 1; i <= _maxGpsAttempts; i++) {
-        if (mounted) {
-          setState(() {
-            _statusMessage = "Wajah Valid ✅\nGPS attempt $i/$_maxGpsAttempts...";
-          });
-        }
-
-        final tGpsStart = DateTime.now();
-        final gps = await _gpsService.getPosition(
-          onProgress: (acc) {
-            if (mounted) {
-              setState(() {
-                _statusMessage = "Wajah Valid ✅\nGPS $i/$_maxGpsAttempts  (acc: ${acc.toStringAsFixed(1)}m)";
-              });
-            }
-          },
+      // ============ ATTEMPT 1 (Fused) ============
+      {
+        final outcome = await _runAttempt(
+          number: 1,
+          useSatellite: false,
+          timeout: const Duration(seconds: 15),
+          sekolahLat: sekolahLat,
+          sekolahLng: sekolahLng,
+          radius: radius,
+          statusPrefix: "Cek lokasi GPS",
         );
-        final durationMs = DateTime.now().difference(tGpsStart).inMilliseconds;
-        totalGpsMs += durationMs;
+        lastResult = outcome.result;
+        if (outcome.fix != null &&
+            (bestFix == null || outcome.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+          bestFix = outcome.fix;
+          bestDistance = outcome.distance;
+        }
+        if (outcome.result == 'success') {
+          await _handleGpsSuccess(outcome.fix!, outcome.distance!, now);
+          return;
+        }
+        if (outcome.result == 'timeout') {
+          useSatellite = true;
+        }
+      }
 
-        String result;
-        double? distance;
-
-        if (gps == null) {
-          result = 'timeout';
-          debugPrint("GPS: attempt $i → timeout (${durationMs}ms)");
-        } else if (!gps.isValid) {
-          result = 'invalid_accuracy';
-          distance = _gpsService.distanceBetween(sekolahLat, sekolahLng, gps.lat, gps.lng);
-          debugPrint("GPS: attempt $i → invalid_accuracy (${gps.accuracyMeters.toStringAsFixed(1)}m, jarak=${distance.toStringAsFixed(1)}m)");
-        } else {
-          distance = _gpsService.distanceBetween(sekolahLat, sekolahLng, gps.lat, gps.lng);
-          if (distance > radius) {
-            result = 'out_of_radius';
-            debugPrint("GPS: attempt $i → out_of_radius (jarak=${distance.toStringAsFixed(1)}m, radius=${radius.toStringAsFixed(0)}m)");
-          } else {
-            result = 'success';
-            successGps = gps;
-            successDistance = distance;
-            debugPrint("GPS: attempt $i → SUCCESS (jarak=${distance.toStringAsFixed(1)}m, acc=${gps.accuracyMeters.toStringAsFixed(1)}m)");
+      // ============ ATTEMPT 2 ============
+      if (useSatellite) {
+        // Satelit — Stage A (tunggu lock 90s)
+        final stageA = await _runAttempt(
+          number: 2,
+          useSatellite: true,
+          timeout: const Duration(seconds: 90),
+          sekolahLat: sekolahLat,
+          sekolahLng: sekolahLng,
+          radius: radius,
+          statusPrefix: "Menunggu sinyal satelit",
+        );
+        lastResult = stageA.result;
+        if (stageA.fix != null &&
+            (bestFix == null || stageA.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+          bestFix = stageA.fix;
+          bestDistance = stageA.distance;
+        }
+        if (stageA.result == 'success') {
+          await _handleGpsSuccess(stageA.fix!, stageA.distance!, now);
+          return;
+        }
+        if (stageA.fix != null) {
+          hasLocked = true;
+          // Stage B — kalibrasi akurasi via stream, max 15s
+          final stageB = await _runAttempt(
+            number: 2,
+            useSatellite: true,
+            timeout: const Duration(seconds: 15),
+            sekolahLat: sekolahLat,
+            sekolahLng: sekolahLng,
+            radius: radius,
+            statusPrefix: "Kalibrasi GPS satelit",
+            useStream: true,
+          );
+          lastResult = stageB.result;
+          if (stageB.fix != null &&
+              (bestFix == null || stageB.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+            bestFix = stageB.fix;
+            bestDistance = stageB.distance;
+          }
+          if (stageB.result == 'success') {
+            await _handleGpsSuccess(stageB.fix!, stageB.distance!, now);
+            return;
           }
         }
-
-        await _logGpsAttempt(
-          attemptNumber: i,
-          startedAt: tGpsStart,
-          doneAt: DateTime.now(),
-          result: result,
-          lat: gps?.lat,
-          lng: gps?.lng,
-          accuracyMeters: gps?.accuracyMeters,
-          distanceToSchool: distance,
-          durationMs: durationMs,
+      } else {
+        // Fused lagi
+        final outcome = await _runAttempt(
+          number: 2,
+          useSatellite: false,
+          timeout: const Duration(seconds: 15),
+          sekolahLat: sekolahLat,
+          sekolahLng: sekolahLng,
+          radius: radius,
+          statusPrefix: "Cek lokasi GPS (2/3)",
         );
-
-        lastResult = result;
-        if (result == 'success') break;
+        lastResult = outcome.result;
+        if (outcome.fix != null &&
+            (bestFix == null || outcome.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+          bestFix = outcome.fix;
+          bestDistance = outcome.distance;
+        }
+        if (outcome.result == 'success') {
+          await _handleGpsSuccess(outcome.fix!, outcome.distance!, now);
+          return;
+        }
+        useSatellite = true;
       }
 
-      _gpsDoneAt = DateTime.now();
-
-      if (successGps != null && successDistance != null) {
-        // ===== ABSEN SUKSES =====
-        final late = _isLate(now);
-
-        // Simpan foto sukses
-        String? photoPath;
-        if (_matchedPhoto != null && _currentSessionUuid != null) {
-          photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'success');
-        }
-
-        await DatabaseService.instance.addAttendance(
-          userId: _currentUserId!,
-          recordedAt: now,
-          lat: successGps.lat,
-          lng: successGps.lng,
-          distanceMeters: successDistance,
-          matchDistance: _matchedDistance!,
-          matchMode: _matchedMode!,
-          connectivityMode: 'online',
-          isLate: late,
-          sessionUuid: _currentSessionUuid,
-          photoPath: photoPath,
+      // ============ ATTEMPT 3 ============
+      if (hasLocked) {
+        // Sudah pernah lock → kalibrasi final 15s
+        final outcome = await _runAttempt(
+          number: 3,
+          useSatellite: true,
+          timeout: const Duration(seconds: 15),
+          sekolahLat: sekolahLat,
+          sekolahLng: sekolahLng,
+          radius: radius,
+          statusPrefix: "Kalibrasi final",
         );
-
-        await _finishSession(
-          finalStatus: 'success',
-          gpsResult: 'success',
-          gpsMs: totalGpsMs,
-          photoPath: photoPath,
-        );
-
-        debugPrint("STREAM: absen VALID. jarak=${successDistance.toStringAsFixed(1)}m, late=$late");
-
-        if (mounted) {
-          setState(() {
-            _statusMessage = "Absensi Berhasil! ✅\n"
-                "Jarak: ${successDistance!.toStringAsFixed(1)}m\n"
-                "Status: ${late ? 'Terlambat' : 'Tepat Waktu'}";
-            _statusColor = Colors.greenAccent;
-          });
+        lastResult = outcome.result;
+        if (outcome.fix != null &&
+            (bestFix == null || outcome.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+          bestFix = outcome.fix;
+          bestDistance = outcome.distance;
         }
-
-        // Trigger sync di background
-        SyncService().syncAll().then((r) => debugPrint("STREAM: sync = $r"));
+        if (outcome.result == 'success') {
+          await _handleGpsSuccess(outcome.fix!, outcome.distance!, now);
+          return;
+        }
       } else {
-        // ===== GPS GAGAL SEMUA =====
-        String? photoPath;
-        if (_matchedPhoto != null && _currentSessionUuid != null) {
-          photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'gps_failed');
-        }
-
-        await _finishSession(
-          finalStatus: 'gps_failed',
-          gpsResult: lastResult,
-          gpsMs: totalGpsMs,
-          photoPath: photoPath,
+        // Belum pernah lock → extratime 90s + kalibrasi 15s
+        final stageA = await _runAttempt(
+          number: 3,
+          useSatellite: true,
+          timeout: const Duration(seconds: 90),
+          sekolahLat: sekolahLat,
+          sekolahLng: sekolahLng,
+          radius: radius,
+          statusPrefix: "Menunggu sinyal satelit (extratime)",
         );
-
-        debugPrint("STREAM: GPS 3x gagal → sesi berakhir gps_failed ($lastResult)");
-
-        if (mounted) {
-          setState(() {
-            _statusMessage = "GPS gagal 3x.\n"
-                "Terakhir: $lastResult\n"
-                "Tekan kamera lagi untuk coba dari awal.";
-            _statusColor = Colors.redAccent;
-          });
+        lastResult = stageA.result;
+        if (stageA.fix != null &&
+            (bestFix == null || stageA.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+          bestFix = stageA.fix;
+          bestDistance = stageA.distance;
         }
+        if (stageA.result == 'success') {
+          await _handleGpsSuccess(stageA.fix!, stageA.distance!, now);
+          return;
+        }
+        if (stageA.fix != null) {
+          hasLocked = true;
+          final stageB = await _runAttempt(
+            number: 3,
+            useSatellite: true,
+            timeout: const Duration(seconds: 15),
+            sekolahLat: sekolahLat,
+            sekolahLng: sekolahLng,
+            radius: radius,
+            statusPrefix: "Kalibrasi final",
+            useStream: true,
+          );
+          lastResult = stageB.result;
+          if (stageB.fix != null &&
+              (bestFix == null || stageB.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+            bestFix = stageB.fix;
+            bestDistance = stageB.distance;
+          }
+          if (stageB.result == 'success') {
+            await _handleGpsSuccess(stageB.fix!, stageB.distance!, now);
+            return;
+          }
+        }
+      }
+
+      // ============ SEMUA GAGAL → REJECT ============
+      _gpsDoneAt = DateTime.now();
+      final totalGpsMs = _gpsDoneAt!.difference(_gpsStartAt!).inMilliseconds;
+
+      String? photoPath;
+      if (_matchedPhoto != null && _currentSessionUuid != null) {
+        photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'gps_failed');
+      }
+
+      await _finishSession(
+        finalStatus: 'gps_failed',
+        gpsResult: lastResult,
+        gpsMs: totalGpsMs,
+        photoPath: photoPath,
+      );
+
+      debugPrint("STREAM: GPS gagal total → sesi berakhir gps_failed ($lastResult)");
+
+      if (mounted) {
+        String userMsg;
+        if (lastResult == 'timeout') {
+          userMsg = "GPS tidak mendapat sinyal.\nCoba lagi di area lebih terbuka.";
+        } else if (lastResult == 'out_of_radius') {
+          final d = bestDistance?.toStringAsFixed(0) ?? '?';
+          userMsg = "Anda di luar radius sekolah.\nJarak: ${d}m (maks ${radius.toStringAsFixed(0)}m)";
+        } else {
+          userMsg = "GPS tidak akurat setelah semua percobaan.\nCoba lagi di area terbuka.";
+        }
+        setState(() {
+          _statusMessage = userMsg;
+          _statusColor = Colors.redAccent;
+        });
       }
     } catch (e) {
-      debugPrint("STREAM: GPS processing error -> $e");
+      debugPrint("STREAM: GPS processing error → $e");
       await _finishSession(finalStatus: 'gps_failed', gpsResult: 'timeout');
       if (mounted) {
         setState(() {
@@ -823,6 +895,119 @@ class _StreamScreenState extends State<StreamScreen> {
       await WakelockPlus.disable();
       debugPrint("WAKELOCK: disabled (GPS done)");
     }
+  }
+
+  /// Satu attempt GPS (one-shot).
+  Future<_AttemptOutcome> _runAttempt({
+    required int number,
+    required bool useSatellite,
+    required Duration timeout,
+    required double sekolahLat,
+    required double sekolahLng,
+    required double radius,
+    required String statusPrefix,
+    bool useStream = false,
+  }) async {
+    if (mounted) {
+      setState(() {
+        _statusMessage = "Wajah Valid ✅\n$statusPrefix...";
+        _statusColor = Colors.orangeAccent;
+      });
+    }
+
+    final tStart = DateTime.now();
+    final gps = await _gpsService.getPositionSingle(
+      timeout: timeout,
+      useSatellite: useSatellite,
+    );
+    final durationMs = DateTime.now().difference(tStart).inMilliseconds;
+
+    String result;
+    double? distance;
+
+    if (gps == null) {
+      result = 'timeout';
+    } else {
+      distance = _gpsService.distanceBetween(sekolahLat, sekolahLng, gps.lat, gps.lng);
+      if (gps.isValid && distance <= radius) {
+        result = 'success';
+      } else if (gps.isValid) {
+        result = 'out_of_radius';
+      } else {
+        result = 'invalid_accuracy';
+      }
+
+      if (mounted) {
+        setState(() {
+          _statusMessage = "Wajah Valid ✅\n$statusPrefix...\n(acc: ${gps.accuracyMeters.toStringAsFixed(1)}m)";
+        });
+      }
+    }
+
+    final mode = useSatellite ? 'SAT' : 'FUSED';
+    debugPrint("GPS: attempt $number [$mode] → $result (${durationMs}ms)");
+
+    await _logGpsAttempt(
+      attemptNumber: number,
+      startedAt: tStart,
+      doneAt: DateTime.now(),
+      result: result,
+      lat: gps?.lat,
+      lng: gps?.lng,
+      accuracyMeters: gps?.accuracyMeters,
+      distanceToSchool: distance,
+      durationMs: durationMs,
+    );
+
+    return _AttemptOutcome(fix: gps, distance: distance, result: result);
+  }
+
+  /// Simpan absen sukses + foto + finish session.
+  Future<void> _handleGpsSuccess(GpsResult fix, double distance, DateTime now) async {
+    _gpsDoneAt = DateTime.now();
+    final totalGpsMs = _gpsDoneAt!.difference(_gpsStartAt!).inMilliseconds;
+    final late = _isLate(now);
+
+    String? photoPath;
+    if (_matchedPhoto != null && _currentSessionUuid != null) {
+      photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'success');
+    }
+
+    await DatabaseService.instance.addAttendance(
+      userId: _currentUserId!,
+      recordedAt: now,
+      lat: fix.lat,
+      lng: fix.lng,
+      distanceMeters: distance,
+      matchDistance: _matchedDistance!,
+      matchMode: _matchedMode!,
+      connectivityMode: 'online',
+      isLate: late,
+      sessionUuid: _currentSessionUuid,
+      photoPath: photoPath,
+    );
+
+    await _finishSession(
+      finalStatus: 'success',
+      gpsResult: 'success',
+      gpsMs: totalGpsMs,
+      photoPath: photoPath,
+    );
+
+    debugPrint("STREAM: absen VALID. jarak=${distance.toStringAsFixed(1)}m, "
+        "acc=${fix.accuracyMeters.toStringAsFixed(1)}m, late=$late");
+
+    if (mounted) {
+      setState(() {
+        _statusMessage = "Absensi Berhasil! ✅\n"
+            "Jarak: ${distance.toStringAsFixed(1)}m\n"
+            "Accuracy: ${fix.accuracyMeters.toStringAsFixed(1)}m\n"
+            "Status: ${late ? 'Terlambat' : 'Tepat Waktu'}";
+        _statusColor = Colors.greenAccent;
+      });
+    }
+
+    SyncService().syncAll().then((r) => debugPrint("STREAM: sync = $r"));
   }
 
   @override

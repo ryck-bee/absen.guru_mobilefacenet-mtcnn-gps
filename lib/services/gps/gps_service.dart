@@ -3,18 +3,15 @@ import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import '../db/sync_service.dart';
 
-/// Hasil pembacaan GPS dengan info lengkap
 class GpsResult {
   final double lat;
   final double lng;
   final double accuracyMeters;
-  final double? distanceToSchool;
 
   GpsResult({
     required this.lat,
     required this.lng,
     required this.accuracyMeters,
-    this.distanceToSchool,
   });
 
   bool get isValid => accuracyMeters <= GpsService.maxAccuracyMeters;
@@ -23,27 +20,10 @@ class GpsResult {
 class GpsService {
   static const double maxAccuracyMeters = 50.0;
 
-  // Timeout dinamis: online (A-GPS bantu) vs offline (satelit murni)
-  static const Duration timeoutOnline = Duration(seconds: 45);
-  static const Duration timeoutOffline = Duration(seconds: 180);
-
-  static const Duration pollInterval = Duration(seconds: 1);
-
-  /// Cek apakah server reachable (real ping via Supabase).
-  /// Return true kalau bisa akses server dalam 3 detik.
   Future<bool> isOnline() async {
     return await SyncService().isServerReachable();
   }
 
-  /// Timeout default berdasarkan kondisi koneksi saat ini
-  Future<Duration> getDynamicTimeout() async {
-    final online = await isOnline();
-    final t = online ? timeoutOnline : timeoutOffline;
-    debugPrint("GPS: mode ${online ? "ONLINE" : "OFFLINE"} (server ping), timeout=${t.inSeconds}s");
-    return t;
-  }
-
-  /// Cek GPS tersedia di device & sudah dinyalakan user
   Future<bool> isGpsReady() async {
     final serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
@@ -59,77 +39,144 @@ class GpsService {
         return false;
       }
     }
-
     if (permission == LocationPermission.deniedForever) {
       debugPrint("GPS: permission denied forever");
       return false;
     }
-
     return true;
   }
 
-  /// Ambil posisi GPS dengan filter accuracy.
-  Future<GpsResult?> getPosition({
-    Duration? timeout,
-    void Function(double accuracy)? onProgress,
+  /// Ambil posisi GPS SATU KALI (one-shot). Tidak ada loop internal.
+  ///
+  /// Return:
+  ///   - GpsResult → dapat fix (accuracy bagus atau jelek, caller yang putuskan)
+  ///   - null → timeout total, tidak ada callback sama sekali
+  Future<GpsResult?> getPositionSingle({
+    required Duration timeout,
+    required bool useSatellite,
   }) async {
-    final effectiveTimeout = timeout ?? await getDynamicTimeout();
     final ready = await isGpsReady();
     if (!ready) return null;
 
-    final startTime = DateTime.now();
-    GpsResult? lastValid;
+    final AndroidSettings settings = AndroidSettings(
+      accuracy: LocationAccuracy.best,
+      distanceFilter: 0,
+      forceLocationManager: useSatellite, // ← KUNCI: switch Fused vs Satelit
+    );
 
-    while (DateTime.now().difference(startTime) < effectiveTimeout) {
-      final elapsed = DateTime.now().difference(startTime);
-      final remaining = effectiveTimeout - elapsed;
+    final label = useSatellite ? 'SAT' : 'FUSED';
+    final tStart = DateTime.now();
 
-      if (remaining.inSeconds < 5) {
-        debugPrint("GPS: sisa waktu ${remaining.inSeconds}s, stop loop");
-        break;
-      }
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: settings,
+      ).timeout(timeout);
 
-      final attemptSeconds = remaining.inSeconds > 32 ? 30 : remaining.inSeconds - 2;
+      final elapsedMs = DateTime.now().difference(tStart).inMilliseconds;
+      debugPrint("GPS: [$label] +${elapsedMs}ms  "
+          "lat=${pos.latitude.toStringAsFixed(6)}, "
+          "lng=${pos.longitude.toStringAsFixed(6)}, "
+          "acc=${pos.accuracy.toStringAsFixed(1)}m");
 
-      try {
-        final pos = await Geolocator.getCurrentPosition(
-          locationSettings: LocationSettings(
-            accuracy: LocationAccuracy.best,
-            timeLimit: Duration(seconds: attemptSeconds),
-          ),
-        ).timeout(Duration(seconds: attemptSeconds + 2));
+      return GpsResult(
+        lat: pos.latitude,
+        lng: pos.longitude,
+        accuracyMeters: pos.accuracy,
+      );
 
-        final result = GpsResult(
-          lat: pos.latitude,
-          lng: pos.longitude,
-          accuracyMeters: pos.accuracy,
-        );
+    } on TimeoutException {
+      final elapsedMs = DateTime.now().difference(tStart).inMilliseconds;
+      debugPrint("GPS: [$label] TIMEOUT setelah ${elapsedMs}ms (0 data)");
+      return null;
 
-        final elapsedMs = DateTime.now().difference(startTime).inMilliseconds;
-        debugPrint("GPS: [+${elapsedMs}ms] lat=${pos.latitude.toStringAsFixed(6)}, lng=${pos.longitude.toStringAsFixed(6)}, acc=${pos.accuracy.toStringAsFixed(1)}m");
-        onProgress?.call(pos.accuracy);
-
-        if (result.isValid) {
-          return result;
-        } else {
-          lastValid = result;
-        }
-      } catch (e) {
-        debugPrint("GPS: error/timeout -> $e");
-      }
-
-      await Future.delayed(pollInterval);
+    } catch (e) {
+      final elapsedMs = DateTime.now().difference(tStart).inMilliseconds;
+      debugPrint("GPS: [$label] ERROR +${elapsedMs}ms → $e");
+      return null;
     }
-
-    debugPrint("GPS: timeout ${effectiveTimeout.inSeconds}s. Terakhir acc=${lastValid?.accuracyMeters.toStringAsFixed(1) ?? '-'}m");
-    return lastValid;
   }
 
-  /// Hitung jarak Haversine antara 2 titik (meter)
-  double distanceBetween(
-    double lat1, double lng1,
-    double lat2, double lng2,
-  ) {
+    /// Kalibrasi GPS pakai stream — terima update berkelanjutan,
+  /// break begitu accuracy ≤50m.
+  ///
+  /// Return:
+  ///   - GpsResult fix terbaik (kalau ≤50m tercapai, langsung return)
+  ///   - GpsResult fix terbaik setelah timeout
+  ///   - null kalau tidak ada fix sama sekali
+  Future<GpsResult?> getPositionStreamCalibrate({
+    required Duration timeout,
+    required bool useSatellite,
+  }) async {
+    final ready = await isGpsReady();
+    if (!ready) return null;
+
+    final AndroidSettings settings = AndroidSettings(
+      accuracy: LocationAccuracy.best,
+      distanceFilter: 0,
+      forceLocationManager: useSatellite,
+    );
+
+    final label = useSatellite ? 'SAT-STREAM' : 'FUSED-STREAM';
+    debugPrint("GPS: [$label] mulai kalibrasi (max ${timeout.inSeconds}s)");
+
+    final completer = Completer<GpsResult?>();
+    StreamSubscription<Position>? sub;
+    Timer? timer;
+    GpsResult? bestFix;
+    final tStart = DateTime.now();
+
+    void finish(GpsResult? result) {
+      if (completer.isCompleted) return;
+      timer?.cancel();
+      sub?.cancel();
+      final ms = DateTime.now().difference(tStart).inMilliseconds;
+      if (result == null) {
+        debugPrint("GPS: [$label] selesai tanpa fix (${ms}ms)");
+      } else {
+        debugPrint("GPS: [$label] selesai dengan acc=${result.accuracyMeters.toStringAsFixed(1)}m (${ms}ms)");
+      }
+      completer.complete(result);
+    }
+
+    try {
+      sub = Geolocator.getPositionStream(locationSettings: settings).listen(
+        (pos) {
+          final elapsedMs = DateTime.now().difference(tStart).inMilliseconds;
+          debugPrint("GPS: [$label] +${elapsedMs}ms acc=${pos.accuracy.toStringAsFixed(1)}m");
+
+          final fix = GpsResult(
+            lat: pos.latitude,
+            lng: pos.longitude,
+            accuracyMeters: pos.accuracy,
+          );
+
+          if (bestFix == null || fix.accuracyMeters < bestFix!.accuracyMeters) {
+            bestFix = fix;
+          }
+
+          if (fix.isValid) {
+            finish(fix);
+          }
+        },
+        onError: (e) {
+          debugPrint("GPS: [$label] stream error → $e");
+        },
+        cancelOnError: false,
+      );
+
+      timer = Timer(timeout, () => finish(bestFix));
+
+      return await completer.future;
+
+    } catch (e) {
+      timer?.cancel();
+      sub?.cancel();
+      debugPrint("GPS: [$label] error → $e");
+      return bestFix;
+    }
+  }
+
+  double distanceBetween(double lat1, double lng1, double lat2, double lng2) {
     return Geolocator.distanceBetween(lat1, lng1, lat2, lng2);
   }
 }

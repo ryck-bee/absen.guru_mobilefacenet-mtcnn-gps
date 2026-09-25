@@ -46,11 +46,25 @@ class GpsService {
     return true;
   }
 
-  /// Ambil posisi GPS SATU KALI (one-shot). Tidak ada loop internal.
-  ///
-  /// Return:
-  ///   - GpsResult → dapat fix (accuracy bagus atau jelek, caller yang putuskan)
-  ///   - null → timeout total, tidak ada callback sama sekali
+  /// Stream mentah posisi GPS. Tanpa logic valid/timeout.
+  /// Dipakai untuk warmup (jalan di background).
+  Stream<GpsResult> watchPosition({required bool useSatellite}) {
+    final AndroidSettings settings = AndroidSettings(
+      accuracy: LocationAccuracy.best,
+      distanceFilter: 0,
+      forceLocationManager: useSatellite,
+    );
+
+    return Geolocator.getPositionStream(locationSettings: settings).map(
+      (pos) => GpsResult(
+        lat: pos.latitude,
+        lng: pos.longitude,
+        accuracyMeters: pos.accuracy,
+      ),
+    );
+  }
+
+  /// One-shot. Fallback.
   Future<GpsResult?> getPositionSingle({
     required Duration timeout,
     required bool useSatellite,
@@ -61,7 +75,7 @@ class GpsService {
     final AndroidSettings settings = AndroidSettings(
       accuracy: LocationAccuracy.best,
       distanceFilter: 0,
-      forceLocationManager: useSatellite, // ← KUNCI: switch Fused vs Satelit
+      forceLocationManager: useSatellite,
     );
 
     final label = useSatellite ? 'SAT' : 'FUSED';
@@ -96,16 +110,17 @@ class GpsService {
     }
   }
 
-    /// Kalibrasi GPS pakai stream — terima update berkelanjutan,
-  /// break begitu accuracy ≤50m.
+  /// Stream kalibrasi — terima update berkelanjutan, break begitu
+  /// accuracy ≤ maxAccuracyMeters.
   ///
-  /// Return:
-  ///   - GpsResult fix terbaik (kalau ≤50m tercapai, langsung return)
-  ///   - GpsResult fix terbaik setelah timeout
-  ///   - null kalau tidak ada fix sama sekali
+  /// [onProgress] dipanggil tiap ~1 detik dengan (elapsed, total) detik.
+  /// Timer pakai Timer.periodic + cek DateTime.now(), tahan idle.
+  /// [isCancelled] dipanggil tiap tick — kalau return true, stream stop.
   Future<GpsResult?> getPositionStreamCalibrate({
     required Duration timeout,
     required bool useSatellite,
+    void Function(int elapsedSeconds, int totalSeconds)? onProgress,
+    bool Function()? isCancelled,
   }) async {
     final ready = await isGpsReady();
     if (!ready) return null;
@@ -121,26 +136,29 @@ class GpsService {
 
     final completer = Completer<GpsResult?>();
     StreamSubscription<Position>? sub;
-    Timer? timer;
+    Timer? periodicTimer;
     GpsResult? bestFix;
     final tStart = DateTime.now();
+    bool finished = false;
 
-    void finish(GpsResult? result) {
-      if (completer.isCompleted) return;
-      timer?.cancel();
+    void finish(GpsResult? result, {String reason = ''}) {
+      if (finished) return;
+      finished = true;
+      periodicTimer?.cancel();
       sub?.cancel();
       final ms = DateTime.now().difference(tStart).inMilliseconds;
       if (result == null) {
-        debugPrint("GPS: [$label] selesai tanpa fix (${ms}ms)");
+        debugPrint("GPS: [$label] selesai tanpa fix (${ms}ms) $reason");
       } else {
-        debugPrint("GPS: [$label] selesai dengan acc=${result.accuracyMeters.toStringAsFixed(1)}m (${ms}ms)");
+        debugPrint("GPS: [$label] selesai dengan acc=${result.accuracyMeters.toStringAsFixed(1)}m (${ms}ms) $reason");
       }
-      completer.complete(result);
+      if (!completer.isCompleted) completer.complete(result);
     }
 
     try {
       sub = Geolocator.getPositionStream(locationSettings: settings).listen(
         (pos) {
+          if (finished) return;
           final elapsedMs = DateTime.now().difference(tStart).inMilliseconds;
           debugPrint("GPS: [$label] +${elapsedMs}ms acc=${pos.accuracy.toStringAsFixed(1)}m");
 
@@ -155,7 +173,7 @@ class GpsService {
           }
 
           if (fix.isValid) {
-            finish(fix);
+            finish(fix, reason: 'break_valid');
           }
         },
         onError: (e) {
@@ -164,13 +182,27 @@ class GpsService {
         cancelOnError: false,
       );
 
-      timer = Timer(timeout, () => finish(bestFix));
+      periodicTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (finished) return;
+
+        // Cek cancel dari luar (misal app resume dari background)
+        if (isCancelled != null && isCancelled()) {
+          finish(bestFix, reason: 'cancel_external');
+          return;
+        }
+
+        final elapsedMs = DateTime.now().difference(tStart).inMilliseconds;
+        final elapsedSec = elapsedMs ~/ 1000;
+        onProgress?.call(elapsedSec, timeout.inSeconds);
+        if (elapsedMs >= timeout.inMilliseconds) {
+          finish(bestFix, reason: 'timeout');
+        }
+      });
 
       return await completer.future;
 
     } catch (e) {
-      timer?.cancel();
-      sub?.cancel();
+      finish(bestFix, reason: 'error');
       debugPrint("GPS: [$label] error → $e");
       return bestFix;
     }

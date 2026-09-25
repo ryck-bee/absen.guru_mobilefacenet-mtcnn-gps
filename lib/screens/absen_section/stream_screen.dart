@@ -13,6 +13,7 @@ import '../../services/gps/gps_service.dart';
 import '../../services/model/mobilefacenet_service.dart';
 import '../../services/model/mtcnn_service.dart';
 import '../../services/monotonic_clock.dart';
+import '../../services/net-service/sync_watchdog.dart';
 import '../../utils/camera_image_utils.dart';
 
 class StreamScreen extends StatefulWidget {
@@ -32,11 +33,11 @@ class StreamScreen extends StatefulWidget {
 class _AttemptOutcome {
   final GpsResult? fix;
   final double? distance;
-  final String result; // 'success' | 'invalid_accuracy' | 'out_of_radius' | 'timeout'
+  final String result;
   _AttemptOutcome({this.fix, this.distance, required this.result});
 }
 
-class _StreamScreenState extends State<StreamScreen> {
+class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver {
   CameraController? _controller;
   DateTime _lastProcessTime = DateTime.now();
 
@@ -58,7 +59,6 @@ class _StreamScreenState extends State<StreamScreen> {
   Color _statusColor = Colors.white54;
   FaceRecognitionResult? _latestTelemetry;
 
-  // ==================== SESSION STATE ====================
   String? _currentSessionUuid;
   String? _currentUserId;
   DateTime? _sessionStartedAt;
@@ -78,24 +78,29 @@ class _StreamScreenState extends State<StreamScreen> {
   int _failedCount = 0;
   int _attemptNumber = 0;
 
-  // Kandidat foto gagal terbaik (distance terkecil)
   img.Image? _bestFailedPhoto;
   double? _bestFailedDistance;
 
-  // Foto & telemetry saat match (untuk simpan foto sukses)
   img.Image? _matchedPhoto;
   double? _matchedDistance;
   String? _matchedMode;
 
   bool _sessionLogged = false;
 
-  // Monotonic clock
   int? _deviceUptimeMs;
   int? _deviceBootTimeMs;
 
-  // ==================== CONFIG ====================
+  StreamSubscription<GpsResult>? _warmupSub;
+  GpsResult? _warmupBestFix;
+  bool _warmupStarted = false;
+
+  // Lifecycle
+  DateTime? _appPausedAt;
+  bool _gpsActive = false;
+  bool _needsRestartAttempt = false;
+  bool _forceCancelGps = false;
+
   static const int _maxFaceAttempts = 10;
-  static const int _maxGpsAttempts = 3;
 
   static const int _jamMasukOnTime = 7;
   static const int _menitMasukOnTime = 30;
@@ -109,7 +114,27 @@ class _StreamScreenState extends State<StreamScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initLightSensor();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _appPausedAt = DateTime.now();
+      debugPrint("APP: paused (gpsActive=$_gpsActive)");
+    } else if (state == AppLifecycleState.resumed) {
+      if (_appPausedAt != null && _gpsActive) {
+        final pauseSec = DateTime.now().difference(_appPausedAt!).inSeconds;
+        debugPrint("APP: resumed setelah ${pauseSec}s background");
+        if (pauseSec >= 5) {
+          debugPrint("APP: GPS mungkin mati saat background → restart attempt (sisa waktu)");
+          _needsRestartAttempt = true;
+          _forceCancelGps = true;
+        }
+      }
+      _appPausedAt = null;
+    }
   }
 
   void _initLightSensor() {
@@ -131,6 +156,7 @@ class _StreamScreenState extends State<StreamScreen> {
     super.didUpdateWidget(oldWidget);
     if (!widget.isActive && oldWidget.isActive) {
       _stopAndDisposeCamera();
+      _stopWarmup();
     }
   }
 
@@ -142,6 +168,42 @@ class _StreamScreenState extends State<StreamScreen> {
   bool _isAbsenTutup(DateTime t) {
     final tutup = DateTime(t.year, t.month, t.day, _jamAbsenTutup, _menitAbsenTutup);
     return t.isAfter(tutup);
+  }
+
+  // ============================================================
+  // WARMUP
+  // ============================================================
+  Future<void> _startWarmup() async {
+    if (_warmupStarted) return;
+    _warmupStarted = true;
+    _warmupBestFix = null;
+
+    final ready = await _gpsService.isGpsReady();
+    if (!ready) {
+      debugPrint("GPS: warmup skip, permission/service belum siap");
+      return;
+    }
+
+    debugPrint("GPS: warmup start (stream Fused di background)");
+
+    _warmupSub = _gpsService.watchPosition(useSatellite: false).listen(
+      (fix) {
+        if (_warmupBestFix == null || fix.accuracyMeters < _warmupBestFix!.accuracyMeters) {
+          _warmupBestFix = fix;
+          debugPrint("GPS: warmup update acc=${fix.accuracyMeters.toStringAsFixed(1)}m");
+        }
+      },
+      onError: (e) => debugPrint("GPS: warmup error → $e"),
+      cancelOnError: false,
+    );
+  }
+
+  Future<void> _stopWarmup() async {
+    if (!_warmupStarted) return;
+    _warmupStarted = false;
+    await _warmupSub?.cancel();
+    _warmupSub = null;
+    debugPrint("GPS: warmup stop");
   }
 
   // ============================================================
@@ -175,6 +237,10 @@ class _StreamScreenState extends State<StreamScreen> {
 
     _deviceUptimeMs = null;
     _deviceBootTimeMs = null;
+
+    _warmupBestFix = null;
+    _forceCancelGps = false;
+    _needsRestartAttempt = false;
   }
 
   Future<String?> _savePhotoToDisk(img.Image image, String sessionUuid, String tag) async {
@@ -217,6 +283,7 @@ class _StreamScreenState extends State<StreamScreen> {
         mfnStatus: mfnStatus,
         mfnMs: mfnMs,
         matchDistance: matchDistance,
+        luxValue: _luxValue,
       );
     } catch (e) {
       debugPrint("STREAM: log face attempt gagal -> $e");
@@ -288,9 +355,21 @@ class _StreamScreenState extends State<StreamScreen> {
         photoPath: photoPath,
         deviceUptimeMs: _deviceUptimeMs,
         deviceBootTimeMs: _deviceBootTimeMs,
+        luxValue: _luxValue,
       );
       _sessionLogged = true;
       debugPrint("STREAM: session $finalStatus logged (session=${_currentSessionUuid})");
+
+      // Trigger sync ke server (fire and forget).
+      // Berlaku untuk semua status: success, failed_verification,
+      // failed_no_face, gps_failed, cancelled, expired.
+      // Kalau ada sync sedang jalan, akan di-skip oleh _isSyncing
+      // flag di SyncService.
+      SyncService().syncAll().then((r) {
+        debugPrint("STREAM: post-finish sync = $r");
+        // Cek pending sisa → aktifkan watchdog kalau ada.
+        SyncWatchdog().notify();
+      });
     } catch (e) {
       debugPrint("STREAM: log session gagal -> $e");
     }
@@ -303,15 +382,14 @@ class _StreamScreenState extends State<StreamScreen> {
     if (_isLoading || _isProcessingGps) return;
 
     if (_isCameraActive) {
-      // Stop manual → log sebagai cancelled kalau belum selesai
       await _stopAndDisposeCamera();
+      await _stopWarmup();
       await _finishSession(finalStatus: 'cancelled');
       return;
     }
 
     _resetSession();
 
-    // Ambil user & id sesi
     final user = await DatabaseService.instance.getUser();
     if (user == null) {
       setState(() {
@@ -324,9 +402,10 @@ class _StreamScreenState extends State<StreamScreen> {
     _currentSessionUuid = _uuid.v4();
     _sessionStartedAt = DateTime.now();
 
-    // Monotonic clock
     _deviceUptimeMs = await MonotonicClock.elapsedRealtimeMs();
     _deviceBootTimeMs = await MonotonicClock.bootTimeMs();
+
+    _startWarmup();
 
     setState(() {
       _isLoading = true;
@@ -472,7 +551,6 @@ class _StreamScreenState extends State<StreamScreen> {
         ? img.copyResize(oriented, width: targetWidth)
         : oriented;
 
-    // ===== MTCNN =====
     final tMtcStart = DateTime.now();
     final faces = await _mtcnnService.detectFaces(working, isGlassesMode: true);
     final mtcnnMs = DateTime.now().difference(tMtcStart).inMilliseconds;
@@ -480,7 +558,6 @@ class _StreamScreenState extends State<StreamScreen> {
 
     _attemptNumber++;
 
-    // === MTCNN GAGAL ===
     if (faces.isEmpty) {
       _failedCount++;
       debugPrint("STREAM: MTCNN 0 wajah (attempt=$_attemptNumber, failed=$_failedCount, ${mtcnnMs}ms)");
@@ -493,26 +570,24 @@ class _StreamScreenState extends State<StreamScreen> {
 
       if (_failedCount >= _maxFaceAttempts) {
         debugPrint("STREAM: 10x gagal → sesi berakhir failed_no_face");
+        await _stopWarmup();
         await _finishSession(finalStatus: 'failed_no_face');
         await _stopAndDisposeCamera();
       }
       return;
     }
 
-    // Wajah terdeteksi
     if (_firstFaceAt == null) _firstFaceAt = DateTime.now();
 
     final bestFace = faces.reduce((a, b) => a.score > b.score ? a : b);
     final aligned = _mtcnnService.alignAndCropFace(working, bestFace);
     final alignedWithLm = _mtcnnService.alignCropAndDrawLandmarks(working, bestFace);
 
-    // ===== MFN =====
     final tMfnStart = DateTime.now();
     final embedding = _mobileFaceNetService.predict(aligned);
     final mfnMs = DateTime.now().difference(tMfnStart).inMilliseconds;
     if (_mfnMsFirst == null) _mfnMsFirst = mfnMs;
 
-    // === MFN GAGAL (null) ===
     if (embedding == null) {
       _failedCount++;
       debugPrint("STREAM: MFN null (attempt=$_attemptNumber, failed=$_failedCount, ${mfnMs}ms)");
@@ -527,14 +602,13 @@ class _StreamScreenState extends State<StreamScreen> {
 
       if (_failedCount >= _maxFaceAttempts) {
         debugPrint("STREAM: 10x gagal → sesi berakhir failed_verification");
-        // Simpan kandidat terbaik (meski tanpa distance, tidak ada foto)
+        await _stopWarmup();
         await _finishSession(finalStatus: 'failed_verification');
         await _stopAndDisposeCamera();
       }
       return;
     }
 
-    // ===== MATCHING =====
     final tMatchStart = DateTime.now();
     final telemetry = _mobileFaceNetService.evaluateFace(embedding);
     final matchMs = DateTime.now().difference(tMatchStart).inMilliseconds;
@@ -554,11 +628,9 @@ class _StreamScreenState extends State<StreamScreen> {
 
     if (mounted) setState(() => _latestTelemetry = telemetry);
 
-    // === MFN GAGAL (distance > threshold) ===
     if (!telemetry.isMatch) {
       _failedCount++;
 
-      // Simpan kandidat terbaik
       if (_bestFailedDistance == null || telemetry.distance < _bestFailedDistance!) {
         _bestFailedDistance = telemetry.distance;
         _bestFailedPhoto = alignedWithLm;
@@ -583,7 +655,6 @@ class _StreamScreenState extends State<StreamScreen> {
       if (_failedCount >= _maxFaceAttempts) {
         debugPrint("STREAM: 10x gagal → sesi berakhir failed_verification");
 
-        // Simpan foto gagal terbaik
         String? photoPath;
         if (_bestFailedPhoto != null && _currentSessionUuid != null) {
           photoPath = await _savePhotoToDisk(
@@ -593,6 +664,7 @@ class _StreamScreenState extends State<StreamScreen> {
           );
         }
 
+        await _stopWarmup();
         await _finishSession(
           finalStatus: 'failed_verification',
           photoPath: photoPath,
@@ -602,7 +674,7 @@ class _StreamScreenState extends State<StreamScreen> {
       return;
     }
 
-    // === MATCH! ===
+    // === MATCH ===
     _faceValidAt = DateTime.now();
     _mtcnnMsFinal = mtcnnMs;
     _mfnMsFinal = mfnMs;
@@ -630,19 +702,21 @@ class _StreamScreenState extends State<StreamScreen> {
       });
     }
 
-    // Stop camera, lanjut GPS
     _isDetecting = false;
     await _stopAndDisposeCamera();
     await _processGps();
   }
 
   // ============================================================
-  // GPS PROCESSING (setelah wajah match)
+  // GPS PROCESSING
   // ============================================================
-    Future<void> _processGps() async {
+  Future<void> _processGps() async {
     _isProcessingGps = true;
     await WakelockPlus.enable();
     debugPrint("WAKELOCK: enabled (GPS start)");
+    _gpsActive = true;
+    await MonotonicClock.startGpsService();
+    debugPrint("FOREGROUND_SERVICE: start");
 
     if (mounted) {
       setState(() {
@@ -655,6 +729,7 @@ class _StreamScreenState extends State<StreamScreen> {
       final now = DateTime.now();
       if (!_debugSkipTimeCheck && _isAbsenTutup(now)) {
         debugPrint("STREAM: absen tutup");
+        await _stopWarmup();
         await _finishSession(finalStatus: 'expired');
         if (mounted) {
           setState(() {
@@ -668,6 +743,7 @@ class _StreamScreenState extends State<StreamScreen> {
       final sekolah = await DatabaseService.instance.getSekolah();
       if (sekolah == null) {
         debugPrint("STREAM: sekolah tidak ada di SQLite");
+        await _stopWarmup();
         await _finishSession(finalStatus: 'gps_failed', gpsResult: 'disabled');
         return;
       }
@@ -678,15 +754,63 @@ class _StreamScreenState extends State<StreamScreen> {
 
       _gpsStartAt = DateTime.now();
 
+      // ============ CEK HASIL WARMUP DULU ============
+      final warmupFix = _warmupBestFix;
+      await _stopWarmup();
+
+      if (warmupFix != null && warmupFix.isValid) {
+        final dist = _gpsService.distanceBetween(
+          sekolahLat, sekolahLng, warmupFix.lat, warmupFix.lng,
+        );
+        debugPrint("GPS: warmup fix dipakai  acc=${warmupFix.accuracyMeters.toStringAsFixed(1)}m, "
+            "dist=${dist.toStringAsFixed(0)}m");
+
+        if (dist <= radius) {
+          await _handleGpsSuccess(warmupFix, dist, now);
+          return;
+        } else {
+          _gpsDoneAt = DateTime.now();
+          final totalGpsMs = _gpsDoneAt!.difference(_gpsStartAt!).inMilliseconds;
+
+          String? photoPath;
+          if (_matchedPhoto != null && _currentSessionUuid != null) {
+            photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'gps_failed');
+          }
+
+          await _finishSession(
+            finalStatus: 'gps_failed',
+            gpsResult: 'out_of_radius',
+            gpsMs: totalGpsMs,
+            photoPath: photoPath,
+          );
+
+          debugPrint("STREAM: warmup fix di luar radius → gps_failed (out_of_radius)");
+
+          if (mounted) {
+            setState(() {
+              _statusMessage = "Anda di luar radius sekolah.\n"
+                  "Jarak: ${dist.toStringAsFixed(0)}m (maks ${radius.toStringAsFixed(0)}m)";
+              _statusColor = Colors.redAccent;
+            });
+          }
+          return;
+        }
+      } else if (warmupFix != null) {
+        debugPrint("GPS: warmup fix acc=${warmupFix.accuracyMeters.toStringAsFixed(1)}m "
+            "(>50m), lanjut attempt 1");
+      } else {
+        debugPrint("GPS: warmup null, lanjut attempt 1");
+      }
+
+      // ============ ATTEMPT 1 (Fused 15s) ============
       bool useSatellite = false;
       bool hasLocked = false;
       GpsResult? bestFix;
       double? bestDistance;
       String lastResult = 'timeout';
 
-      // ============ ATTEMPT 1 (Fused) ============
       {
-        final outcome = await _runAttempt(
+        final outcome = await _runAttemptWithRestart(
           number: 1,
           useSatellite: false,
           timeout: const Duration(seconds: 15),
@@ -712,8 +836,7 @@ class _StreamScreenState extends State<StreamScreen> {
 
       // ============ ATTEMPT 2 ============
       if (useSatellite) {
-        // Satelit — Stage A (tunggu lock 90s)
-        final stageA = await _runAttempt(
+        final stageA = await _runAttemptWithRestart(
           number: 2,
           useSatellite: true,
           timeout: const Duration(seconds: 90),
@@ -721,6 +844,8 @@ class _StreamScreenState extends State<StreamScreen> {
           sekolahLng: sekolahLng,
           radius: radius,
           statusPrefix: "Menunggu sinyal satelit",
+          hintAtSeconds: 60,
+          hintText: "Coba pindah ke area lebih terbuka.",
         );
         lastResult = stageA.result;
         if (stageA.fix != null &&
@@ -734,8 +859,7 @@ class _StreamScreenState extends State<StreamScreen> {
         }
         if (stageA.fix != null) {
           hasLocked = true;
-          // Stage B — kalibrasi akurasi via stream, max 15s
-          final stageB = await _runAttempt(
+          final stageB = await _runAttemptWithRestart(
             number: 2,
             useSatellite: true,
             timeout: const Duration(seconds: 15),
@@ -743,7 +867,6 @@ class _StreamScreenState extends State<StreamScreen> {
             sekolahLng: sekolahLng,
             radius: radius,
             statusPrefix: "Kalibrasi GPS satelit",
-            useStream: true,
           );
           lastResult = stageB.result;
           if (stageB.fix != null &&
@@ -755,10 +878,18 @@ class _StreamScreenState extends State<StreamScreen> {
             await _handleGpsSuccess(stageB.fix!, stageB.distance!, now);
             return;
           }
+        } else {
+          debugPrint("GPS: attempt 2 SAT 0 fix → early exit, tidak lanjut attempt 3");
+          await _handleGpsFailed(
+            result: 'timeout',
+            bestFix: bestFix,
+            bestDistance: bestDistance,
+            radius: radius,
+          );
+          return;
         }
       } else {
-        // Fused lagi
-        final outcome = await _runAttempt(
+        final outcome = await _runAttemptWithRestart(
           number: 2,
           useSatellite: false,
           timeout: const Duration(seconds: 15),
@@ -782,8 +913,7 @@ class _StreamScreenState extends State<StreamScreen> {
 
       // ============ ATTEMPT 3 ============
       if (hasLocked) {
-        // Sudah pernah lock → kalibrasi final 15s
-        final outcome = await _runAttempt(
+        final outcome = await _runAttemptWithRestart(
           number: 3,
           useSatellite: true,
           timeout: const Duration(seconds: 15),
@@ -803,8 +933,7 @@ class _StreamScreenState extends State<StreamScreen> {
           return;
         }
       } else {
-        // Belum pernah lock → extratime 90s + kalibrasi 15s
-        final stageA = await _runAttempt(
+        final stageA = await _runAttemptWithRestart(
           number: 3,
           useSatellite: true,
           timeout: const Duration(seconds: 90),
@@ -825,7 +954,7 @@ class _StreamScreenState extends State<StreamScreen> {
         }
         if (stageA.fix != null) {
           hasLocked = true;
-          final stageB = await _runAttempt(
+          final stageB = await _runAttemptWithRestart(
             number: 3,
             useSatellite: true,
             timeout: const Duration(seconds: 15),
@@ -833,7 +962,6 @@ class _StreamScreenState extends State<StreamScreen> {
             sekolahLng: sekolahLng,
             radius: radius,
             statusPrefix: "Kalibrasi final",
-            useStream: true,
           );
           lastResult = stageB.result;
           if (stageB.fix != null &&
@@ -848,41 +976,17 @@ class _StreamScreenState extends State<StreamScreen> {
         }
       }
 
-      // ============ SEMUA GAGAL → REJECT ============
-      _gpsDoneAt = DateTime.now();
-      final totalGpsMs = _gpsDoneAt!.difference(_gpsStartAt!).inMilliseconds;
-
-      String? photoPath;
-      if (_matchedPhoto != null && _currentSessionUuid != null) {
-        photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'gps_failed');
-      }
-
-      await _finishSession(
-        finalStatus: 'gps_failed',
-        gpsResult: lastResult,
-        gpsMs: totalGpsMs,
-        photoPath: photoPath,
+      // ============ SEMUA GAGAL ============
+      await _handleGpsFailed(
+        result: lastResult,
+        bestFix: bestFix,
+        bestDistance: bestDistance,
+        radius: radius,
       );
 
-      debugPrint("STREAM: GPS gagal total → sesi berakhir gps_failed ($lastResult)");
-
-      if (mounted) {
-        String userMsg;
-        if (lastResult == 'timeout') {
-          userMsg = "GPS tidak mendapat sinyal.\nCoba lagi di area lebih terbuka.";
-        } else if (lastResult == 'out_of_radius') {
-          final d = bestDistance?.toStringAsFixed(0) ?? '?';
-          userMsg = "Anda di luar radius sekolah.\nJarak: ${d}m (maks ${radius.toStringAsFixed(0)}m)";
-        } else {
-          userMsg = "GPS tidak akurat setelah semua percobaan.\nCoba lagi di area terbuka.";
-        }
-        setState(() {
-          _statusMessage = userMsg;
-          _statusColor = Colors.redAccent;
-        });
-      }
     } catch (e) {
       debugPrint("STREAM: GPS processing error → $e");
+      await _stopWarmup();
       await _finishSession(finalStatus: 'gps_failed', gpsResult: 'timeout');
       if (mounted) {
         setState(() {
@@ -892,12 +996,112 @@ class _StreamScreenState extends State<StreamScreen> {
       }
     } finally {
       _isProcessingGps = false;
+      _gpsActive = false;
+      await MonotonicClock.stopGpsService();
+      debugPrint("FOREGROUND_SERVICE: stop");
       await WakelockPlus.disable();
       debugPrint("WAKELOCK: disabled (GPS done)");
     }
   }
 
-  /// Satu attempt GPS (one-shot).
+  Future<void> _handleGpsFailed({
+    required String result,
+    GpsResult? bestFix,
+    double? bestDistance,
+    required double radius,
+  }) async {
+    _gpsDoneAt = DateTime.now();
+    final totalGpsMs = _gpsDoneAt!.difference(_gpsStartAt!).inMilliseconds;
+
+    String? photoPath;
+    if (_matchedPhoto != null && _currentSessionUuid != null) {
+      photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'gps_failed');
+    }
+
+    await _finishSession(
+      finalStatus: 'gps_failed',
+      gpsResult: result,
+      gpsMs: totalGpsMs,
+      photoPath: photoPath,
+    );
+
+    debugPrint("STREAM: GPS gagal → sesi berakhir gps_failed ($result)");
+
+    if (mounted) {
+      String userMsg;
+      if (result == 'timeout') {
+        userMsg = "GPS tidak mendapat sinyal.\nCoba lagi di area lebih terbuka.";
+      } else if (result == 'out_of_radius') {
+        final d = bestDistance?.toStringAsFixed(0) ?? '?';
+        userMsg = "Anda di luar radius sekolah.\nJarak: ${d}m (maks ${radius.toStringAsFixed(0)}m)";
+      } else {
+        userMsg = "GPS tidak akurat setelah semua percobaan.\nCoba lagi di area terbuka.";
+      }
+      setState(() {
+        _statusMessage = userMsg;
+        _statusColor = Colors.redAccent;
+      });
+    }
+  }
+
+  /// Wrapper: jalankan attempt, ulang kalau app resume dari background.
+  /// Waktu total attempt tetap (timeout), tapi kalau di-background,
+  /// waktu yang terbuang dipotong dari timeout iterasi berikutnya.
+  Future<_AttemptOutcome> _runAttemptWithRestart({
+    required int number,
+    required bool useSatellite,
+    required Duration timeout,
+    required double sekolahLat,
+    required double sekolahLng,
+    required double radius,
+    required String statusPrefix,
+    int? hintAtSeconds,
+    String? hintText,
+  }) async {
+    final tStart = DateTime.now();
+    while (true) {
+      _needsRestartAttempt = false;
+      _forceCancelGps = false;
+
+      final elapsedMs = DateTime.now().difference(tStart).inMilliseconds;
+      final remainingMs = timeout.inMilliseconds - elapsedMs;
+
+      if (remainingMs <= 0) {
+        debugPrint("GPS: attempt $number habis waktu sebelum restart "
+            "(elapsed=${elapsedMs}ms, timeout=${timeout.inMilliseconds}ms)");
+        return _AttemptOutcome(fix: null, distance: null, result: 'timeout');
+      }
+
+      final outcome = await _runAttempt(
+        number: number,
+        useSatellite: useSatellite,
+        timeout: Duration(milliseconds: remainingMs),
+        sekolahLat: sekolahLat,
+        sekolahLng: sekolahLng,
+        radius: radius,
+        statusPrefix: statusPrefix,
+        hintAtSeconds: hintAtSeconds,
+        hintText: hintText,
+      );
+
+      if (!_needsRestartAttempt) return outcome;
+
+      final usedMs = DateTime.now().difference(tStart).inMilliseconds;
+      final leftMs = timeout.inMilliseconds - usedMs;
+      debugPrint("GPS: attempt $number diulang "
+          "(sudah pakai ${usedMs}ms, sisa ${leftMs}ms)");
+
+      if (mounted) {
+        setState(() {
+          _statusMessage = "Wajah Valid ✅\nRestart GPS setelah background...";
+          _statusColor = Colors.orangeAccent;
+        });
+      }
+    }
+  }
+
+  /// Satu attempt GPS — stream kalibrasi.
+  /// [hintAtSeconds] & [hintText] opsional: UI tambah hint setelah detik tertentu.
   Future<_AttemptOutcome> _runAttempt({
     required int number,
     required bool useSatellite,
@@ -906,7 +1110,8 @@ class _StreamScreenState extends State<StreamScreen> {
     required double sekolahLng,
     required double radius,
     required String statusPrefix,
-    bool useStream = false,
+    int? hintAtSeconds,
+    String? hintText,
   }) async {
     if (mounted) {
       setState(() {
@@ -916,10 +1121,26 @@ class _StreamScreenState extends State<StreamScreen> {
     }
 
     final tStart = DateTime.now();
-    final gps = await _gpsService.getPositionSingle(
+    final mode = useSatellite ? 'SAT' : 'FUSED';
+    debugPrint("GPS: attempt $number [$mode] ($statusPrefix) — start, timeout=${timeout.inSeconds}s");
+
+    final gps = await _gpsService.getPositionStreamCalibrate(
       timeout: timeout,
       useSatellite: useSatellite,
+      isCancelled: () => _forceCancelGps,
+      onProgress: (elapsed, total) {
+        if (!mounted) return;
+        String msg = "Wajah Valid ✅\n$statusPrefix ($elapsed/$total detik)";
+        if (hintAtSeconds != null && hintText != null && elapsed >= hintAtSeconds) {
+          msg += "\n$hintText";
+        }
+        setState(() {
+          _statusMessage = msg;
+          _statusColor = Colors.orangeAccent;
+        });
+      },
     );
+
     final durationMs = DateTime.now().difference(tStart).inMilliseconds;
 
     String result;
@@ -944,8 +1165,7 @@ class _StreamScreenState extends State<StreamScreen> {
       }
     }
 
-    final mode = useSatellite ? 'SAT' : 'FUSED';
-    debugPrint("GPS: attempt $number [$mode] → $result (${durationMs}ms)");
+    debugPrint("GPS: attempt $number [$mode] ($statusPrefix) → $result (${durationMs}ms)");
 
     await _logGpsAttempt(
       attemptNumber: number,
@@ -962,7 +1182,6 @@ class _StreamScreenState extends State<StreamScreen> {
     return _AttemptOutcome(fix: gps, distance: distance, result: result);
   }
 
-  /// Simpan absen sukses + foto + finish session.
   Future<void> _handleGpsSuccess(GpsResult fix, double distance, DateTime now) async {
     _gpsDoneAt = DateTime.now();
     final totalGpsMs = _gpsDoneAt!.difference(_gpsStartAt!).inMilliseconds;
@@ -972,6 +1191,9 @@ class _StreamScreenState extends State<StreamScreen> {
     if (_matchedPhoto != null && _currentSessionUuid != null) {
       photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'success');
     }
+
+    // Cek server benar-benar reachable (bukan cuma WiFi nyala).
+    final isOnline = await SyncService().isServerReachable();
 
     await DatabaseService.instance.addAttendance(
       userId: _currentUserId!,
@@ -1006,14 +1228,13 @@ class _StreamScreenState extends State<StreamScreen> {
         _statusColor = Colors.greenAccent;
       });
     }
-
-    SyncService().syncAll().then((r) => debugPrint("STREAM: sync = $r"));
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _lightSubscription?.cancel();
-    // Log sesi kalau belum selesai (best-effort, tidak bisa await di dispose)
+    _stopWarmup();
     if (!_sessionLogged && _currentSessionUuid != null) {
       _finishSession(finalStatus: 'cancelled');
     }
@@ -1021,9 +1242,6 @@ class _StreamScreenState extends State<StreamScreen> {
     super.dispose();
   }
 
-  // ============================================================
-  // BUILD
-  // ============================================================
   @override
   Widget build(BuildContext context) {
     return Scaffold(

@@ -1,19 +1,10 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-/// Akses Monotonic Clock Android via native plugin.
-///
-/// `elapsedRealtime` = uptime HP sejak boot (ms), tidak bisa diubah user,
-/// tidak reset walau user ubah jam sistem.
-///
-/// Dipakai untuk deteksi time-tampering: bandingkan wall-clock dengan
-/// estimasi waktu dari anchor (server_time + delta uptime).
 class MonotonicClock {
   MonotonicClock._();
   static const _channel = MethodChannel('com.example.absensi_wajah/monotonic_clock');
 
-  /// Uptime HP dalam milidetik sejak boot.
-  /// Return null kalau plugin tidak tersedia (misal di iOS atau test).
   static Future<int?> elapsedRealtimeMs() async {
     try {
       final v = await _channel.invokeMethod<int>('getElapsedRealtime');
@@ -24,8 +15,6 @@ class MonotonicClock {
     }
   }
 
-  /// Wall-clock time saat HP menyala (perkiraan).
-  /// Return null kalau plugin tidak tersedia.
   static Future<int?> bootTimeMs() async {
     try {
       final v = await _channel.invokeMethod<int>('getBootTimeMillis');
@@ -33,6 +22,40 @@ class MonotonicClock {
     } catch (e) {
       debugPrint("MonotonicClock.bootTimeMs error: $e");
       return null;
+    }
+  }
+
+  /// Nyalakan foreground service supaya GPS tetap hidup saat app di-background.
+  static Future<bool> startGpsService() async {
+    try {
+      final v = await _channel.invokeMethod<bool>('startGpsService');
+      return v ?? false;
+    } catch (e) {
+      debugPrint("MonotonicClock.startGpsService error: $e");
+      return false;
+    }
+  }
+
+  /// Matikan foreground service.
+  static Future<bool> stopGpsService() async {
+    try {
+      final v = await _channel.invokeMethod<bool>('stopGpsService');
+      return v ?? false;
+    } catch (e) {
+      debugPrint("MonotonicClock.stopGpsService error: $e");
+      return false;
+    }
+  }
+
+  /// Minta izin notifikasi (Android 13+).
+  /// Return: true kalau sudah/belum perlu, false kalau ditolak.
+  static Future<bool> requestNotificationPermission() async {
+    try {
+      final v = await _channel.invokeMethod<bool>('requestNotificationPermission');
+      return v ?? false;
+    } catch (e) {
+      debugPrint("MonotonicClock.requestNotificationPermission error: $e");
+      return false;
     }
   }
 }

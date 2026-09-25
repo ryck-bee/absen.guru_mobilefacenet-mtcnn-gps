@@ -8,6 +8,10 @@ import '../services/db/database_service.dart';
 import '../services/db/supabase_service.dart';
 import '../services/model/mobilefacenet_service.dart';
 import '../services/db/sync_service.dart';
+import '../services/monotonic_clock.dart';
+import '../services/db/sync_service.dart';
+import '../services/net-service/network_monitor.dart';
+import '../services/net-service/sync_watchdog.dart';
 
 class MainScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -25,7 +29,21 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+
+    // Dengar alarm koneksi dari Android.
+    NetworkMonitor.registerHandler(() {
+      // Internet baru tersedia → coba sync instan.
+      SyncWatchdog().notify();
+    });
+    NetworkMonitor.start();
+
     _bootstrapSession();
+  }
+
+  @override
+  void dispose() {
+    NetworkMonitor.stop();
+    super.dispose();
   }
 
   Future<void> _bootstrapSession() async {
@@ -71,12 +89,18 @@ class _MainScreenState extends State<MainScreen> {
         debugPrint("BOOTSTRAP: User sudah ada (${dbUser['nama_lengkap']})");
       }
 
+      // Minta izin notifikasi (Android 13+)
+      await MonotonicClock.requestNotificationPermission();
+
       // Selalu load embedding dari SQLite ke memory
       await MobileFaceNetService().loadFromDatabase();
 
       // Trigger sync di background (tidak block UI)
+      // Trigger sync di background (tidak block UI)
       SyncService().syncAll().then((r) {
         debugPrint("BOOTSTRAP: sync result = $r");
+        // Cek apakah masih ada pending → aktifkan watchdog.
+        SyncWatchdog().notify();
       });
 
     } catch (e) {

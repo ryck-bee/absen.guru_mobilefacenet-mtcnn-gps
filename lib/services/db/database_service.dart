@@ -12,7 +12,7 @@ class DatabaseService {
   static final DatabaseService instance = DatabaseService._();
 
   Database? _db;
-  static const int _dbVersion = 4;
+  static const int _dbVersion = 6;
   static const String _dbName = 'absensi_wajah.db';
   static const _uuid = Uuid();
 
@@ -45,7 +45,7 @@ class DatabaseService {
   }
 
   // ============================================================
-  // SCHEMA v4
+  // SCHEMA v6
   // ============================================================
   Future<void> _onCreate(Database db, int version) async {
     await db.execute('''
@@ -99,6 +99,7 @@ class DatabaseService {
         connectivity_mode TEXT NOT NULL,
         is_late INTEGER NOT NULL DEFAULT 0,
         photo_path TEXT,
+        photo_url TEXT,
         sync_status TEXT NOT NULL DEFAULT 'pending',
         synced_at TEXT
       )
@@ -130,6 +131,8 @@ class DatabaseService {
         photo_path TEXT,
         device_uptime_ms INTEGER,
         device_boot_time_ms INTEGER,
+        lux_value INTEGER,
+        photo_url TEXT,
         sync_status TEXT NOT NULL DEFAULT 'pending',
         synced_at TEXT
       )
@@ -148,6 +151,7 @@ class DatabaseService {
         mfn_status TEXT,
         mfn_ms INTEGER,
         match_distance REAL,
+        lux_value INTEGER,
         sync_status TEXT NOT NULL DEFAULT 'pending',
         synced_at TEXT
       )
@@ -285,6 +289,16 @@ class DatabaseService {
           updated_at TEXT NOT NULL
         )
       ''');
+    }
+
+    if (oldVersion < 5) {
+      await db.execute('ALTER TABLE session_logs_local ADD COLUMN lux_value INTEGER');
+      await db.execute('ALTER TABLE face_attempts_local ADD COLUMN lux_value INTEGER');
+    }
+
+    if (oldVersion < 6) {
+      await db.execute('ALTER TABLE session_logs_local ADD COLUMN photo_url TEXT');
+      await db.execute('ALTER TABLE attendance_local ADD COLUMN photo_url TEXT');
     }
   }
 
@@ -460,6 +474,7 @@ class DatabaseService {
     String? photoPath,
     int? deviceUptimeMs,
     int? deviceBootTimeMs,
+    int? luxValue,
   }) async {
     final db = await database;
     return await db.insert('session_logs_local', {
@@ -486,6 +501,7 @@ class DatabaseService {
       'photo_path': photoPath,
       'device_uptime_ms': deviceUptimeMs,
       'device_boot_time_ms': deviceBootTimeMs,
+      'lux_value': luxValue,
       'sync_status': 'pending',
     });
   }
@@ -496,10 +512,14 @@ class DatabaseService {
         where: 'sync_status = ?', whereArgs: ['pending'], orderBy: 'started_at ASC');
   }
 
-  Future<void> markSessionLogSynced(int id) async {
+  Future<void> markSessionLogSynced(int id, {String? photoUrl}) async {
     final db = await database;
-    await db.update('session_logs_local',
-        {'sync_status': 'synced', 'synced_at': DateTime.now().toIso8601String()},
+    final values = <String, dynamic>{
+      'sync_status': 'synced',
+      'synced_at': DateTime.now().toIso8601String(),
+    };
+    if (photoUrl != null) values['photo_url'] = photoUrl;
+    await db.update('session_logs_local', values,
         where: 'id = ?', whereArgs: [id]);
   }
 
@@ -516,6 +536,7 @@ class DatabaseService {
     String? mfnStatus,
     int? mfnMs,
     double? matchDistance,
+    int? luxValue,
   }) async {
     final db = await database;
     return await db.insert('face_attempts_local', {
@@ -529,6 +550,7 @@ class DatabaseService {
       'mfn_status': mfnStatus,
       'mfn_ms': mfnMs,
       'match_distance': matchDistance,
+      'lux_value': luxValue,
       'sync_status': 'pending',
     });
   }
@@ -634,10 +656,14 @@ class DatabaseService {
         where: 'sync_status = ?', whereArgs: ['pending'], orderBy: 'recorded_at ASC');
   }
 
-  Future<void> markAttendanceSynced(int id) async {
+  Future<void> markAttendanceSynced(int id, {String? photoUrl}) async {
     final db = await database;
-    await db.update('attendance_local',
-        {'sync_status': 'synced', 'synced_at': DateTime.now().toIso8601String()},
+    final values = <String, dynamic>{
+      'sync_status': 'synced',
+      'synced_at': DateTime.now().toIso8601String(),
+    };
+    if (photoUrl != null) values['photo_url'] = photoUrl;
+    await db.update('attendance_local', values,
         where: 'id = ?', whereArgs: [id]);
   }
 
@@ -651,6 +677,28 @@ class DatabaseService {
     final db = await database;
     final r = await db.rawQuery("SELECT COUNT(*) as c FROM attendance_local WHERE sync_status = 'pending'");
     return Sqflite.firstIntValue(r) ?? 0;
+  }
+
+  // ============================================================
+  // PENDING CHECK (untuk SyncWatchdog)
+  // ============================================================
+  Future<bool> hasAnyPending() async {
+    final db = await database;
+    const tables = [
+      'embeddings_local',
+      'attendance_local',
+      'session_logs_local',
+      'face_attempts_local',
+      'gps_attempts_local',
+    ];
+    for (final t in tables) {
+      final r = await db.rawQuery(
+        "SELECT COUNT(*) as c FROM $t WHERE sync_status = 'pending'",
+      );
+      final count = Sqflite.firstIntValue(r) ?? 0;
+      if (count > 0) return true;
+    }
+    return false;
   }
 
   // ============================================================

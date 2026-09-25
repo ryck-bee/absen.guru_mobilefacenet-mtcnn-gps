@@ -67,6 +67,11 @@ class SyncService {
 
   static const String _photoBucket = 'face_photos';
 
+  // Cache untuk isServerReachable
+  DateTime? _lastReachableCheck;
+  bool? _lastReachableResult;
+  static const _reachableCacheDuration = Duration(seconds: 5);
+
   /// Sync semua pending data ke Supabase.
   Future<SyncResult> syncAll() async {
     if (_isSyncing) {
@@ -104,11 +109,10 @@ class SyncService {
         }
       }
 
-      // === 2. SESSION LOGS (parent untuk face/gps attempts) ===
+      // === 2. SESSION LOGS ===
       final pendingSession = await DatabaseService.instance.getPendingSessionLogs();
       debugPrint("SYNC: ${pendingSession.length} session log pending");
       for (final row in pendingSession) {
-        // Upload foto dulu (kalau ada)
         String? photoUrl = row['photo_url'] as String?;
         final photoPath = row['photo_path'] as String?;
         final sessionUuid = row['client_uuid'] as String?;
@@ -120,19 +124,21 @@ class SyncService {
             photoOk++;
           } else {
             photoFail++;
-            // Foto gagal tapi log tetap dicoba upload
           }
         }
 
         if (await _uploadSessionLog(row, photoUrl)) {
-          await DatabaseService.instance.markSessionLogSynced(row['id'] as int);
+          await DatabaseService.instance.markSessionLogSynced(
+            row['id'] as int,
+            photoUrl: photoUrl,
+          );
           slOk++;
         } else {
           slFail++;
         }
       }
 
-      // === 3. FACE ATTEMPTS (child dari session) ===
+      // === 3. FACE ATTEMPTS ===
       final pendingFace = await DatabaseService.instance.getPendingFaceAttempts();
       debugPrint("SYNC: ${pendingFace.length} face attempt pending");
       for (final row in pendingFace) {
@@ -144,7 +150,7 @@ class SyncService {
         }
       }
 
-      // === 4. GPS ATTEMPTS (child dari session) ===
+      // === 4. GPS ATTEMPTS ===
       final pendingGps = await DatabaseService.instance.getPendingGpsAttempts();
       debugPrint("SYNC: ${pendingGps.length} gps attempt pending");
       for (final row in pendingGps) {
@@ -156,11 +162,10 @@ class SyncService {
         }
       }
 
-      // === 5. ATTENDANCE (absen sukses) ===
+      // === 5. ATTENDANCE ===
       final pendingAtt = await DatabaseService.instance.getPendingAttendance();
       debugPrint("SYNC: ${pendingAtt.length} attendance pending");
       for (final row in pendingAtt) {
-        // Upload foto (kalau ada)
         String? photoUrl = row['photo_url'] as String?;
         final photoPath = row['photo_path'] as String?;
         final clientUuid = row['client_uuid'] as String?;
@@ -176,14 +181,17 @@ class SyncService {
         }
 
         if (await _uploadAttendance(row, photoUrl)) {
-          await DatabaseService.instance.markAttendanceSynced(row['id'] as int);
+          await DatabaseService.instance.markAttendanceSynced(
+            row['id'] as int,
+            photoUrl: photoUrl,
+          );
           attOk++;
         } else {
           attFail++;
         }
       }
 
-      // === 6. UPDATE ANCHOR (monotonic clock) ===
+      // === 6. UPDATE ANCHOR ===
       await _updateAnchor(userId);
 
     } catch (e) {
@@ -228,7 +236,7 @@ class SyncService {
       });
       return true;
     } on PostgrestException catch (e) {
-      if (e.code == '23505') return true; // sudah ada
+      if (e.code == '23505') return true;
       debugPrint("SYNC: embedding $clientUuid gagal -> ${e.message}");
       return false;
     } catch (e) {
@@ -266,6 +274,7 @@ class SyncService {
         'photo_url': photoUrl,
         'device_uptime_ms': row['device_uptime_ms'],
         'device_boot_time_ms': row['device_boot_time_ms'],
+        'lux_value': row['lux_value'],
       });
       return true;
     } on PostgrestException catch (e) {
@@ -294,6 +303,7 @@ class SyncService {
         'mfn_status': row['mfn_status'],
         'mfn_ms': row['mfn_ms'],
         'match_distance': row['match_distance'],
+        'lux_value': row['lux_value'],
       });
       return true;
     } on PostgrestException catch (e) {
@@ -345,6 +355,7 @@ class SyncService {
         'client_uuid': clientUuid,
         'user_id': row['user_id'],
         'recorded_at': row['recorded_at'],
+        'local_timestamp': row['local_timestamp'],
         'lat': row['lat'],
         'lng': row['lng'],
         'distance_meters': row['distance_meters'],
@@ -365,9 +376,6 @@ class SyncService {
     }
   }
 
-  /// Upload foto ke Supabase Storage.
-  /// Path: `{user_id}/{client_uuid}_{type}.jpg`
-  /// Return path di Storage kalau sukses, null kalau gagal.
   Future<String?> _uploadPhoto(
     String localPath,
     String userId,
@@ -397,10 +405,8 @@ class SyncService {
     }
   }
 
-  /// Update anchor Monotonic Clock setelah sync sukses.
   Future<void> _updateAnchor(String userId) async {
     try {
-      // Ambil waktu server via RPC
       final serverTimeResp = await _client.rpc('get_server_time');
       final serverTime = DateTime.parse(serverTimeResp.toString()).toUtc();
 
@@ -425,17 +431,28 @@ class SyncService {
     }
   }
 
-  /// Cek apakah server reachable (real ping).
-  Future<bool> isServerReachable() async {
+  /// Cek apakah server reachable (real ping ke Supabase).
+  /// Hasil di-cache 5 detik supaya tidak spam.
+  Future<bool> isServerReachable({bool useCache = true}) async {
+    if (useCache && _lastReachableCheck != null) {
+      final age = DateTime.now().difference(_lastReachableCheck!);
+      if (age < _reachableCacheDuration && _lastReachableResult != null) {
+        return _lastReachableResult!;
+      }
+    }
     try {
       await _client
           .from('sekolah')
           .select('id')
           .limit(1)
-          .timeout(const Duration(seconds: 3));
+          .timeout(const Duration(seconds: 5));
+      _lastReachableCheck = DateTime.now();
+      _lastReachableResult = true;
       return true;
     } catch (e) {
       debugPrint("SYNC: server tidak reachable -> $e");
+      _lastReachableCheck = DateTime.now();
+      _lastReachableResult = false;
       return false;
     }
   }

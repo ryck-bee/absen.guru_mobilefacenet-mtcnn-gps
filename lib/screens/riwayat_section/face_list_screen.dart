@@ -5,6 +5,7 @@ import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
+import 'package:light/light.dart';
 import '../../services/db/database_service.dart';
 import '../../services/db/sync_service.dart';
 import '../../services/model/mobilefacenet_service.dart';
@@ -44,6 +45,10 @@ class _FaceListScreenState extends State<FaceListScreen> {
 
   static const _uuid = Uuid();
 
+  Light? _light;
+  StreamSubscription? _lightSubscription;
+  int _luxValue = 0;
+
   bool get _isCameraReady =>
       _isCameraInitialized &&
       _controller != null &&
@@ -52,8 +57,23 @@ class _FaceListScreenState extends State<FaceListScreen> {
   @override
   void initState() {
     super.initState();
+    _initLightSensor();
     if (widget.isActive) {
       _loadAndInit();
+    }
+  }
+
+  void _initLightSensor() {
+    try {
+      _light = Light();
+      _lightSubscription = _light?.lightSensorStream.listen(
+        (luxValue) {
+          if (mounted) setState(() => _luxValue = luxValue);
+        },
+        onError: (error) => debugPrint("REG: error sensor cahaya -> $error"),
+      );
+    } catch (e) {
+      debugPrint("REG: sensor cahaya tidak didukung -> $e");
     }
   }
 
@@ -321,6 +341,7 @@ class _FaceListScreenState extends State<FaceListScreen> {
         finalAt: now,
         photoPath: photoPath,
         failedCount: mtcnnStatus == 'no_face' ? 1 : 0,
+        luxValue: _luxValue,
       );
 
       if (mtcnnStatus != null) {
@@ -334,6 +355,7 @@ class _FaceListScreenState extends State<FaceListScreen> {
           mfnStatus: mfnStatus,
           mfnMs: mfnMs,
           matchDistance: null,
+          luxValue: _luxValue,
         );
       }
     } catch (e) {
@@ -493,6 +515,7 @@ class _FaceListScreenState extends State<FaceListScreen> {
 
   @override
   void dispose() {
+    _lightSubscription?.cancel();
     _stopAndDisposeCamera();
     super.dispose();
   }

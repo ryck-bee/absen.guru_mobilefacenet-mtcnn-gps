@@ -47,3 +47,27 @@ foto ke server.
 5. `flutter run`
 
 ## Struktur Proyek
+
+lib/
+├── main.dart
+├── config/ # konfigurasi (threshold, Supabase)
+├── screens/ # UI (login, absen, riwayat, registrasi)
+├── services/ # logika (GPS, model, database, sync)
+└── utils/ # helper
+
+## Cara Kerja Singkat
+
+1. Guru buka aplikasi → GPS warmup jalan di background.
+2. Kamera depan aktif. MTCNN deteksi wajah, MobileFaceNet ekstraksi embedding.
+3. Wajah dicocokkan dengan database lokal (Euclidean Distance).
+4. Jika cocok → cek lokasi GPS (radius 50m dari sekolah).
+5. Jika dalam radius → absen tercatat, sync ke server (jika internet tersedia).
+6. Jika internet mati → data tersimpan lokal, sync otomatis saat internet kembali
+   (via alarm koneksi dan sync watchdog).
+
+## Status
+
+Penelitian skripsi — Program Studi Teknik Informatika,
+Universitas Muhammadiyah Jember.
+
+**Penulis:** Riko Putra Dwi Susanto (2010651111)

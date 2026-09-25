@@ -48,12 +48,15 @@ foto ke server.
 
 ## Struktur Proyek
 
+```
 lib/
-├── main.dart
-├── config/ # konfigurasi (threshold, Supabase)
-├── screens/ # UI (login, absen, riwayat, registrasi)
-├── services/ # logika (GPS, model, database, sync)
-└── utils/ # helper
+├── config/       # konfigurasi threshold & Supabase
+├── screens/      # UI (login, absen, riwayat, registrasi)
+├── services/     # logika (GPS, model, database, sync, network)
+└── utils/        # helper
+
+android/.../kotlin/   # plugin native (monotonic, network, GPS service)
+```
 
 ## Cara Kerja Singkat
 

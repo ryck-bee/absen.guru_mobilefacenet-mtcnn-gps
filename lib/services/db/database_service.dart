@@ -799,7 +799,8 @@ class DatabaseService {
     }
 
     final expiredEmb = await db.query('embeddings_local',
-        where: "sync_status = 'pending' AND created_at < ?", whereArgs: [cutoff]);
+        where: "sync_status = 'pending' AND source != 'learning' AND created_at < ?",
+        whereArgs: [cutoff]);
     for (final row in expiredEmb) {
       await db.delete('embeddings_local', where: 'id = ?', whereArgs: [row['id']]);
       totalDeleted++;

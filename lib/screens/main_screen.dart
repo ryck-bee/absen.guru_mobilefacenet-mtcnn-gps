@@ -4,6 +4,7 @@ import 'package:camera/camera.dart';
 import 'absen_section/stream_screen.dart';
 import 'profile_section/profil_screen.dart';
 import '../config/app_colors.dart';
+import '../config/app_spacing.dart';
 import '../services/db/database_service.dart';
 import '../services/db/supabase_service.dart';
 import '../services/db/sync_service.dart';
@@ -11,6 +12,7 @@ import '../services/model/mobilefacenet_service.dart';
 import '../services/net-service/network_monitor.dart';
 import '../services/net-service/sync_watchdog.dart';
 import '../widgets/bottom_navbar.dart';
+import 'riwayat_section/history_screen.dart';
 
 class MainScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -138,15 +140,50 @@ class _MainScreenState extends State<MainScreen> {
     return Scaffold(
       backgroundColor: AppColors.cream,
       extendBody: true,
-      body: IndexedStack(
-        index: _currentIndex,
+      body: Stack(
+        fit: StackFit.expand,
         children: [
-          ProfilScreen(cameras: widget.cameras),
-          StreamScreen(
-            cameras: widget.cameras,
-            isActive: _currentIndex == 1,
+          IndexedStack(
+            index: _currentIndex,
+            children: [
+              ProfilScreen(cameras: widget.cameras),
+              StreamScreen(
+                cameras: widget.cameras,
+                isActive: _currentIndex == 1,
+              ),
+              HistoryScreen(key: historyScreenKey),
+            ],
           ),
-          const _RiwayatPlaceholder(),
+          if (_currentIndex == 2)
+            Positioned(
+              right: AppSpacing.horizontal(context),
+              bottom: MediaQuery.of(context).padding.bottom + 13,
+              child: Material(
+                color: (historyScreenKey.currentState?.showCalendar ?? false)
+                    ? AppColors.tealMedium
+                    : AppColors.navbarBg,
+                shape: const CircleBorder(),
+                elevation: 4,
+                child: InkWell(
+                  onTap: () {
+                    historyScreenKey.currentState?.toggleCalendarFromParent();
+                    setState(() {});
+                  },
+                  customBorder: const CircleBorder(),
+                  child: SizedBox(
+                    width: AppSpacing.fabSize(context),
+                    height: AppSpacing.fabSize(context),
+                    child: Icon(
+                      (historyScreenKey.currentState?.showCalendar ?? false)
+                          ? Icons.chevron_left
+                          : Icons.calendar_month,
+                      color: Colors.white,
+                      size: AppSpacing.fabIconSize(context),
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
       bottomNavigationBar: BottomNavbar(
@@ -154,26 +191,6 @@ class _MainScreenState extends State<MainScreen> {
         onTap: (index) {
           setState(() => _currentIndex = index);
         },
-      ),
-    );
-  }
-}
-
-/// Placeholder sementara untuk tab Riwayat.
-/// Nanti diganti dengan layar riwayat absen + kalender.
-class _RiwayatPlaceholder extends StatelessWidget {
-  const _RiwayatPlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      backgroundColor: AppColors.cream,
-      body: Center(
-        child: Text(
-          'Riwayat absen\n(segera hadir)',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: AppColors.darkSlate),
-        ),
       ),
     );
   }

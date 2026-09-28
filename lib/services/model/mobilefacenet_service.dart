@@ -8,36 +8,37 @@ import '../../config/glasses_config.dart';
 import '../db/database_service.dart';
 import '../debug_logger.dart';
 
+/// Satu sampel wajah — registrasi atau learning.
+class FaceEntry {
+  /// ID di SQLite. `null` = registrasi baru (belum ada ID di memory).
+  /// Non-null = learning (selalu ada ID dari insert).
+  final int? dbId;
+  final List<double> embedding;
+  final String source; // 'registration' | 'learning'
+  final DateTime createdAt;
+
+  FaceEntry({
+    this.dbId,
+    required this.embedding,
+    required this.source,
+    required this.createdAt,
+  });
+}
+
 /// Data wajah satu user — dipisah antara non-kacamata dan kacamata
 class UserFaceData {
-  final List<List<double>> nonGlasses;
-  final List<List<double>> glasses;
+  final List<FaceEntry> nonGlasses;
+  final List<FaceEntry> glasses;
 
   UserFaceData({
-    List<List<double>>? nonGlasses,
-    List<List<double>>? glasses,
+    List<FaceEntry>? nonGlasses,
+    List<FaceEntry>? glasses,
   })  : nonGlasses = nonGlasses ?? [],
         glasses = glasses ?? [];
 
   int get totalSamples => nonGlasses.length + glasses.length;
   bool get hasNonGlasses => nonGlasses.isNotEmpty;
   bool get hasGlasses => glasses.isNotEmpty;
-
-  Map<String, dynamic> toJson() => {
-        'non_glasses': nonGlasses,
-        'glasses': glasses,
-      };
-
-  factory UserFaceData.fromJson(Map<String, dynamic> json) {
-    return UserFaceData(
-      nonGlasses: (json['non_glasses'] as List)
-          .map((e) => (e as List).map((v) => (v as num).toDouble()).toList())
-          .toList(),
-      glasses: (json['glasses'] as List)
-          .map((e) => (e as List).map((v) => (v as num).toDouble()).toList())
-          .toList(),
-    );
-  }
 }
 
 /// Hasil pencocokan wajah (Telemetry)
@@ -231,11 +232,17 @@ class MobileFaceNetService {
     String mode = 'non_glasses',
   }) async {
     final data = _registeredUsers.putIfAbsent(userId, () => UserFaceData());
+    final entry = FaceEntry(
+      dbId: null,
+      embedding: embedding,
+      source: 'registration',
+      createdAt: DateTime.now(),
+    );
 
     if (mode == 'glasses') {
-      data.glasses.add(embedding);
+      data.glasses.add(entry);
     } else {
-      data.nonGlasses.add(embedding);
+      data.nonGlasses.add(entry);
     }
 
     if (sampleImage != null) {
@@ -248,12 +255,7 @@ class MobileFaceNetService {
     }
   }
 
-  void saveUserEmbedding(String id, List<double> embedding) {
-    final data = _registeredUsers.putIfAbsent(id, () => UserFaceData());
-    data.nonGlasses.add(embedding);
-  }
-
-    /// Load semua embedding dari SQLite lokal ke memory.
+  /// Load semua embedding dari SQLite lokal ke memory.
   /// Dipanggil setelah login / app restart.
   Future<void> loadFromDatabase() async {
     try {
@@ -274,11 +276,21 @@ class MobileFaceNetService {
         final embRaw = jsonDecode(row['embedding'] as String) as List;
         final emb = embRaw.map((v) => (v as num).toDouble()).toList();
 
+        final entry = FaceEntry(
+          dbId: row['id'] as int?,
+          embedding: emb,
+          source: (row['source'] as String?) ?? 'registration',
+          createdAt: DateTime.tryParse(
+                (row['created_at'] as String?) ?? '',
+              ) ??
+              DateTime.now(),
+        );
+
         final data = _registeredUsers.putIfAbsent(userId, () => UserFaceData());
         if (mode == 'glasses') {
-          data.glasses.add(emb);
+          data.glasses.add(entry);
         } else {
-          data.nonGlasses.add(emb);
+          data.nonGlasses.add(entry);
         }
       }
 
@@ -306,8 +318,8 @@ class MobileFaceNetService {
     double minDistStep1 = double.infinity;
 
     _registeredUsers.forEach((id, data) {
-      for (final emb in data.nonGlasses) {
-        double dist = _euclideanDistance(targetEmbedding, emb);
+      for (final entry in data.nonGlasses) {
+        double dist = _euclideanDistance(targetEmbedding, entry.embedding);
         if (dist < minDistStep1) {
           minDistStep1 = dist;
           bestIdStep1 = id;
@@ -334,8 +346,8 @@ class MobileFaceNetService {
     double minDistStep2 = double.infinity;
 
     _registeredUsers.forEach((id, data) {
-      for (final emb in data.glasses) {
-        double dist = _euclideanDistance(targetEmbedding, emb);
+      for (final entry in data.glasses) {
+        double dist = _euclideanDistance(targetEmbedding, entry.embedding);
         if (dist < minDistStep2) {
           minDistStep2 = dist;
           bestIdStep2 = id;
@@ -446,8 +458,8 @@ class MobileFaceNetService {
       final existing = _registeredUsers[userId];
       if (existing != null) {
         final pool = <List<double>>[
-          ...existing.nonGlasses,
-          ...existing.glasses,
+          ...existing.nonGlasses.map((e) => e.embedding),
+          ...existing.glasses.map((e) => e.embedding),
         ];
         for (final old in pool) {
           final d = _euclideanDistance(embedding, old);
@@ -458,30 +470,48 @@ class MobileFaceNetService {
         }
       }
 
-      // 2. Cek batas 30.
+      // 2. Cek batas 30. Kalau penuh, hapus yang paling lama (DB + memory).
       final count = await DatabaseService.instance.countLearningEmbeddings(userId);
       if (count >= 30) {
         final oldestId = await DatabaseService.instance.getOldestLearningEmbeddingId(userId);
         if (oldestId != null) {
           await DatabaseService.instance.deleteEmbeddingById(oldestId);
+
+          // Self-heal: hapus dari memory juga.
+          final data = _registeredUsers[userId];
+          if (data != null) {
+            final beforeLen = data.glasses.length + data.nonGlasses.length;
+            data.glasses.removeWhere((e) => e.dbId == oldestId);
+            data.nonGlasses.removeWhere((e) => e.dbId == oldestId);
+            final afterLen = data.glasses.length + data.nonGlasses.length;
+            if (beforeLen == afterLen) {
+              debugPrint("MFN learn: WARNING oldestId=$oldestId tidak ada di memory");
+            }
+          }
           debugPrint("MFN learn: max 30, hapus id=$oldestId (FIFO)");
         }
       }
 
-      // 3. Simpan ke DB.
-      await DatabaseService.instance.addEmbedding(
+      // 3. Simpan ke DB, tangkap ID-nya.
+      final newId = await DatabaseService.instance.addEmbedding(
         userId: userId,
         mode: mode,
         embedding: embedding,
         source: 'learning',
       );
 
-      // 4. Tambah ke memory.
+      // 4. Tambah ke memory dengan ID yang sama.
+      final entry = FaceEntry(
+        dbId: newId,
+        embedding: embedding,
+        source: 'learning',
+        createdAt: DateTime.now(),
+      );
       final data = _registeredUsers.putIfAbsent(userId, () => UserFaceData());
       if (mode == 'glasses') {
-        data.glasses.add(embedding);
+        data.glasses.add(entry);
       } else {
-        data.nonGlasses.add(embedding);
+        data.nonGlasses.add(entry);
       }
 
       // 5. Log ke file terpisah.

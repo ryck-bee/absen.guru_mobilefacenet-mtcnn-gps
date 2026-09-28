@@ -17,6 +17,7 @@ import '../../services/monotonic_clock.dart';
 import '../../services/net-service/sync_watchdog.dart';
 import '../../utils/camera_image_utils.dart';
 import '../../config/app_colors.dart';
+import '../../config/app_spacing.dart';
 
 class StreamScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -117,7 +118,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   static const int _menitMasukOnTime = 30;
   static const int _jamAbsenTutup = 10;
   static const int _menitAbsenTutup = 30;
-  static const bool _debugSkipTimeCheck = false;
+  static const bool _debugSkipTimeCheck = true;
   static const bool _debugForceDisable = false;
 
   bool get _isCameraReady =>
@@ -213,6 +214,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   bool get _canStartCamera {
     if (_debugForceDisable) return false;
     if (!_hasRegisteredFace) return false;
+    if (_debugSkipTimeCheck) return true;
     final now = DateTime.now();
     if (_isIzinMode) return _isIzinOpen(now);
     return _isAbsenOpen(now);
@@ -1485,13 +1487,14 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   }
 
   Widget _buildNormalContent({Key? key}) {
+    final gutter = AppSpacing.horizontal(context);
     return LayoutBuilder(
       key: key,
       builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
           constraints: BoxConstraints(minHeight: constraints.maxHeight),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
+            padding: EdgeInsets.fromLTRB(gutter, 8, gutter, 96),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
@@ -1506,13 +1509,14 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   }
 
   Widget _buildIzinContent({Key? key}) {
+    final gutter = AppSpacing.horizontal(context);
     return LayoutBuilder(
       key: key,
       builder: (context, constraints) => SingleChildScrollView(
         child: ConstrainedBox(
           constraints: BoxConstraints(minHeight: constraints.maxHeight),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 8, 24, 96),
+            padding: EdgeInsets.fromLTRB(gutter, 8, gutter, 96),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
@@ -1535,7 +1539,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         child: Opacity(
           opacity: enabled ? 1.0 : 0.55,
           child: Container(
-            width: MediaQuery.of(context).size.width * 0.85,
+            width: double.infinity,
             height: MediaQuery.of(context).size.width * 1.0 * 1.15,
             decoration: BoxDecoration(
               color: Colors.black,
@@ -1606,7 +1610,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     const double itemHeight = 48;
 
     return SizedBox(
-      width: MediaQuery.of(context).size.width * 0.85,
+      width: double.infinity,
       child: Row(
         children: [
           GestureDetector(
@@ -1659,7 +1663,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     const double borderW = 1.5;
 
     return SizedBox(
-      width: MediaQuery.of(context).size.width * 0.85,
+      width: double.infinity,
       child: Row(
         children: [
           GestureDetector(

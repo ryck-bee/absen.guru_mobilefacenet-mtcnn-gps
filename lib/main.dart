@@ -71,6 +71,7 @@ class MyApp extends StatelessWidget {
       title: 'Absensi Wajah',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
+        fontFamily: 'Quicksand',
         primarySwatch: Colors.blue,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,

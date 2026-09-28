@@ -355,6 +355,7 @@ class SyncService {
         'client_uuid': clientUuid,
         'user_id': row['user_id'],
         'recorded_at': row['recorded_at'],
+        'recorded_date': row['recorded_date'],
         'local_timestamp': row['local_timestamp'],
         'lat': row['lat'],
         'lng': row['lng'],
@@ -363,6 +364,8 @@ class SyncService {
         'match_mode': row['match_mode'],
         'connectivity_mode': row['connectivity_mode'],
         'is_late': (row['is_late'] as int) == 1,
+        'is_izin': (row['is_izin'] as int? ?? 0) == 1,
+        'izin_type': row['izin_type'],
         'photo_url': photoUrl,
       });
       return true;

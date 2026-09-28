@@ -7,6 +7,7 @@ import 'package:light/light.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:flutter/services.dart';
 import '../../services/db/database_service.dart';
 import '../../services/db/sync_service.dart';
 import '../../services/gps/gps_service.dart';
@@ -15,6 +16,7 @@ import '../../services/model/mtcnn_service.dart';
 import '../../services/monotonic_clock.dart';
 import '../../services/net-service/sync_watchdog.dart';
 import '../../utils/camera_image_utils.dart';
+import '../../config/app_colors.dart';
 
 class StreamScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -59,6 +61,15 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   Color _statusColor = Colors.white54;
   FaceRecognitionResult? _latestTelemetry;
 
+  bool _isIzinMode = false;
+  String _izinType = 'izin';
+
+  bool _isOnline = false;
+  Timer? _onlineCheckTimer;
+
+  // Cek wajah terdaftar (fresh install).
+  bool _hasRegisteredFace = false;
+
   String? _currentSessionUuid;
   String? _currentUserId;
   DateTime? _sessionStartedAt;
@@ -84,6 +95,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   img.Image? _matchedPhoto;
   double? _matchedDistance;
   String? _matchedMode;
+  List<double>? _matchedEmbedding;
 
   bool _sessionLogged = false;
 
@@ -94,7 +106,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   GpsResult? _warmupBestFix;
   bool _warmupStarted = false;
 
-  // Lifecycle
   DateTime? _appPausedAt;
   bool _gpsActive = false;
   bool _needsRestartAttempt = false;
@@ -106,7 +117,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   static const int _menitMasukOnTime = 30;
   static const int _jamAbsenTutup = 10;
   static const int _menitAbsenTutup = 30;
-  static const bool _debugSkipTimeCheck = true;
+  static const bool _debugSkipTimeCheck = false;
+  static const bool _debugForceDisable = false;
 
   bool get _isCameraReady =>
       _isCameraActive && !_isLoading && _controller != null && _controller!.value.isInitialized;
@@ -116,6 +128,20 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initLightSensor();
+
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.dark,
+      statusBarBrightness: Brightness.light,
+    ));
+
+    _checkOnline();
+    _onlineCheckTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _checkOnline(),
+    );
+
+    _checkRegisteredFace();
   }
 
   @override
@@ -157,6 +183,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     if (!widget.isActive && oldWidget.isActive) {
       _stopAndDisposeCamera();
       _stopWarmup();
+    } else if (widget.isActive && !oldWidget.isActive) {
+      _checkRegisteredFace();
     }
   }
 
@@ -170,9 +198,109 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     return t.isAfter(tutup);
   }
 
-  // ============================================================
-  // WARMUP
-  // ============================================================
+  bool _isAbsenOpen(DateTime t) {
+    final open = DateTime(t.year, t.month, t.day, 6, 30);
+    final close = DateTime(t.year, t.month, t.day, 10, 30);
+    return t.isAfter(open) && t.isBefore(close);
+  }
+
+  bool _isIzinOpen(DateTime t) {
+    final open = DateTime(t.year, t.month, t.day, 5, 0);
+    final close = DateTime(t.year, t.month, t.day, 12, 0);
+    return t.isAfter(open) && t.isBefore(close);
+  }
+
+  bool get _canStartCamera {
+    if (_debugForceDisable) return false;
+    if (!_hasRegisteredFace) return false;
+    final now = DateTime.now();
+    if (_isIzinMode) return _isIzinOpen(now);
+    return _isAbsenOpen(now);
+  }
+
+  String get _disabledReason {
+    if (_debugForceDisable) {
+      return "Absen tidak tersedia\n(06:30 - 10:30)";
+    }
+    if (!_hasRegisteredFace) {
+      return "Wajah belum terdaftar\nBuka Profil → Daftar Wajah";
+    }
+    final now = DateTime.now();
+    if (_isIzinMode && !_isIzinOpen(now)) {
+      return "Di luar jam izin\n(05:00 - 12:00)";
+    }
+    if (!_isIzinMode && !_isAbsenOpen(now)) {
+      return "Absen tidak tersedia\n(06:30 - 10:30)";
+    }
+    return "Absen tidak tersedia";
+  }
+
+  Future<void> _checkOnline() async {
+    try {
+      final online = await SyncService().isServerReachable(useCache: false);
+      if (mounted && online != _isOnline) {
+        setState(() => _isOnline = online);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _checkRegisteredFace() async {
+    try {
+      final user = await DatabaseService.instance.getUser();
+      if (user == null) return;
+      final userId = user['user_id'] as String;
+      _currentUserId = userId;
+      final hasFace = _mobileFaceNetService.hasUser(userId);
+      if (mounted && hasFace != _hasRegisteredFace) {
+        setState(() => _hasRegisteredFace = hasFace);
+      } else {
+        _hasRegisteredFace = hasFace;
+      }
+      debugPrint("STREAM: wajah terdaftar = $hasFace (user=$userId)");
+    } catch (e) {
+      debugPrint("STREAM: cek wajah terdaftar error -> $e");
+    }
+  }
+
+  void _toggleIzinMode() {
+    if (_isCameraActive || _isLoading || _isProcessingGps) return;
+    setState(() {
+      _isIzinMode = !_isIzinMode;
+      _izinType = 'izin';
+      _statusMessage = _isIzinMode
+          ? "Mode Izin\nKetuk kotak kamera untuk lanjut"
+          : "Kamera Nonaktif\nKetuk kotak kamera di atas untuk mulai";
+      _statusColor = _isIzinMode ? Colors.white70 : Colors.white54;
+    });
+  }
+
+  Future<void> _pickIzinType() async {
+    if (!_isIzinMode) return;
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.pan_tool_alt),
+              title: const Text('Izin'),
+              onTap: () => Navigator.pop(ctx, 'izin'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.sick),
+              title: const Text('Sakit'),
+              onTap: () => Navigator.pop(ctx, 'sakit'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null && mounted) {
+      setState(() => _izinType = selected);
+    }
+  }
+
   Future<void> _startWarmup() async {
     if (_warmupStarted) return;
     _warmupStarted = true;
@@ -196,6 +324,35 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       onError: (e) => debugPrint("GPS: warmup error → $e"),
       cancelOnError: false,
     );
+
+    _warmupOneShotCache();
+  }
+
+  Future<void> _warmupOneShotCache() async {
+    try {
+      debugPrint("GPS: warmup one-shot cek cache");
+      final fix = await _gpsService.getPositionSingle(
+        timeout: const Duration(seconds: 5),
+        useSatellite: false,
+      );
+      if (fix == null) {
+        debugPrint("GPS: warmup one-shot null (cache kosong)");
+        return;
+      }
+      if (fix.accuracyMeters > GpsService.maxAccuracyMeters) {
+        debugPrint("GPS: warmup one-shot acc=${fix.accuracyMeters.toStringAsFixed(1)}m "
+            "(>50m), abaikan");
+        return;
+      }
+      if (_warmupBestFix == null ||
+          fix.accuracyMeters < _warmupBestFix!.accuracyMeters) {
+        _warmupBestFix = fix;
+        debugPrint("GPS: warmup one-shot dipakai "
+            "acc=${fix.accuracyMeters.toStringAsFixed(1)}m");
+      }
+    } catch (e) {
+      debugPrint("GPS: warmup one-shot error → $e");
+    }
   }
 
   Future<void> _stopWarmup() async {
@@ -206,12 +363,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     debugPrint("GPS: warmup stop");
   }
 
-  // ============================================================
-  // SESSION HELPERS
-  // ============================================================
   void _resetSession() {
     _currentSessionUuid = null;
-    _currentUserId = null;
     _sessionStartedAt = null;
     _cameraReadyAt = null;
     _firstFaceAt = null;
@@ -233,6 +386,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     _matchedPhoto = null;
     _matchedDistance = null;
     _matchedMode = null;
+    _matchedEmbedding = null;
     _sessionLogged = false;
 
     _deviceUptimeMs = null;
@@ -360,14 +514,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       _sessionLogged = true;
       debugPrint("STREAM: session $finalStatus logged (session=${_currentSessionUuid})");
 
-      // Trigger sync ke server (fire and forget).
-      // Berlaku untuk semua status: success, failed_verification,
-      // failed_no_face, gps_failed, cancelled, expired.
-      // Kalau ada sync sedang jalan, akan di-skip oleh _isSyncing
-      // flag di SyncService.
       SyncService().syncAll().then((r) {
         debugPrint("STREAM: post-finish sync = $r");
-        // Cek pending sisa → aktifkan watchdog kalau ada.
         SyncWatchdog().notify();
       });
     } catch (e) {
@@ -375,11 +523,17 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     }
   }
 
-  // ============================================================
-  // CAMERA CONTROL
-  // ============================================================
   Future<void> _toggleOrStartCamera() async {
     if (_isLoading || _isProcessingGps) return;
+
+    if (!_isCameraActive && !_canStartCamera) {
+      debugPrint("STREAM: tidak bisa mulai. ${_disabledReason}");
+      setState(() {
+        _statusMessage = _disabledReason;
+        _statusColor = Colors.white54;
+      });
+      return;
+    }
 
     if (_isCameraActive) {
       await _stopAndDisposeCamera();
@@ -499,9 +653,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     }
   }
 
-  // ============================================================
-  // CAMERA STREAM
-  // ============================================================
   void _startCameraStream() {
     if (_controller == null || !_controller!.value.isInitialized) return;
     if (_controller!.value.isStreamingImages) return;
@@ -674,7 +825,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       return;
     }
 
-    // === MATCH ===
     _faceValidAt = DateTime.now();
     _mtcnnMsFinal = mtcnnMs;
     _mfnMsFinal = mfnMs;
@@ -683,6 +833,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     _matchedPhoto = alignedWithLm;
     _matchedDistance = telemetry.distance;
     _matchedMode = telemetry.matchMode;
+    _matchedEmbedding = embedding;
 
     await _logFaceAttempt(
       attemptNumber: _attemptNumber,
@@ -707,9 +858,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     await _processGps();
   }
 
-  // ============================================================
-  // GPS PROCESSING
-  // ============================================================
   Future<void> _processGps() async {
     _isProcessingGps = true;
     await WakelockPlus.enable();
@@ -754,7 +902,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
       _gpsStartAt = DateTime.now();
 
-      // ============ CEK HASIL WARMUP DULU ============
       final warmupFix = _warmupBestFix;
       await _stopWarmup();
 
@@ -765,7 +912,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         debugPrint("GPS: warmup fix dipakai  acc=${warmupFix.accuracyMeters.toStringAsFixed(1)}m, "
             "dist=${dist.toStringAsFixed(0)}m");
 
-        if (dist <= radius) {
+        if (_isIzinMode || dist <= radius) {
           await _handleGpsSuccess(warmupFix, dist, now);
           return;
         } else {
@@ -802,7 +949,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         debugPrint("GPS: warmup null, lanjut attempt 1");
       }
 
-      // ============ ATTEMPT 1 (Fused 15s) ============
       bool useSatellite = false;
       bool hasLocked = false;
       GpsResult? bestFix;
@@ -834,7 +980,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         }
       }
 
-      // ============ ATTEMPT 2 ============
       if (useSatellite) {
         final stageA = await _runAttemptWithRestart(
           number: 2,
@@ -911,7 +1056,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         useSatellite = true;
       }
 
-      // ============ ATTEMPT 3 ============
       if (hasLocked) {
         final outcome = await _runAttemptWithRestart(
           number: 3,
@@ -976,7 +1120,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         }
       }
 
-      // ============ SEMUA GAGAL ============
       await _handleGpsFailed(
         result: lastResult,
         bestFix: bestFix,
@@ -1040,13 +1183,14 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       setState(() {
         _statusMessage = userMsg;
         _statusColor = Colors.redAccent;
+        if (_isIzinMode) {
+          _isIzinMode = false;
+          _izinType = 'izin';
+        }
       });
     }
   }
 
-  /// Wrapper: jalankan attempt, ulang kalau app resume dari background.
-  /// Waktu total attempt tetap (timeout), tapi kalau di-background,
-  /// waktu yang terbuang dipotong dari timeout iterasi berikutnya.
   Future<_AttemptOutcome> _runAttemptWithRestart({
     required int number,
     required bool useSatellite,
@@ -1100,8 +1244,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     }
   }
 
-  /// Satu attempt GPS — stream kalibrasi.
-  /// [hintAtSeconds] & [hintText] opsional: UI tambah hint setelah detik tertentu.
   Future<_AttemptOutcome> _runAttempt({
     required int number,
     required bool useSatellite,
@@ -1150,7 +1292,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       result = 'timeout';
     } else {
       distance = _gpsService.distanceBetween(sekolahLat, sekolahLng, gps.lat, gps.lng);
-      if (gps.isValid && distance <= radius) {
+      if (gps.isValid && (_isIzinMode || distance <= radius)) {
         result = 'success';
       } else if (gps.isValid) {
         result = 'out_of_radius';
@@ -1192,8 +1334,9 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       photoPath = await _savePhotoToDisk(_matchedPhoto!, _currentSessionUuid!, 'success');
     }
 
-    // Cek server benar-benar reachable (bukan cuma WiFi nyala).
     final isOnline = await SyncService().isServerReachable();
+    final isIzin = _isIzinMode;
+    final izinType = isIzin ? _izinType : null;
 
     await DatabaseService.instance.addAttendance(
       userId: _currentUserId!,
@@ -1203,8 +1346,10 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       distanceMeters: distance,
       matchDistance: _matchedDistance!,
       matchMode: _matchedMode!,
-      connectivityMode: 'online',
-      isLate: late,
+      connectivityMode: isOnline ? 'online' : 'offline',
+      isLate: isIzin ? false : late,
+      isIzin: isIzin,
+      izinType: izinType,
       sessionUuid: _currentSessionUuid,
       photoPath: photoPath,
     );
@@ -1216,17 +1361,53 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       photoPath: photoPath,
     );
 
-    debugPrint("STREAM: absen VALID. jarak=${distance.toStringAsFixed(1)}m, "
-        "acc=${fix.accuracyMeters.toStringAsFixed(1)}m, late=$late");
+    if (isIzin) {
+      debugPrint("STREAM: izin VALID. jarak=${distance.toStringAsFixed(1)}m, "
+          "acc=${fix.accuracyMeters.toStringAsFixed(1)}m, type=$izinType");
+    } else {
+      debugPrint("STREAM: absen VALID. jarak=${distance.toStringAsFixed(1)}m, "
+          "acc=${fix.accuracyMeters.toStringAsFixed(1)}m, late=$late");
+    }
 
     if (mounted) {
       setState(() {
-        _statusMessage = "Absensi Berhasil! ✅\n"
-            "Jarak: ${distance.toStringAsFixed(1)}m\n"
-            "Accuracy: ${fix.accuracyMeters.toStringAsFixed(1)}m\n"
-            "Status: ${late ? 'Terlambat' : 'Tepat Waktu'}";
+        if (isIzin) {
+          _statusMessage = "Izin Berhasil! ✅\n"
+              "Jenis: ${izinType == 'izin' ? 'Izin' : 'Sakit'}\n"
+              "Jarak: ${distance.toStringAsFixed(1)}m\n"
+              "Accuracy: ${fix.accuracyMeters.toStringAsFixed(1)}m";
+        } else {
+          _statusMessage = "Absensi Berhasil! ✅\n"
+              "Jarak: ${distance.toStringAsFixed(1)}m\n"
+              "Accuracy: ${fix.accuracyMeters.toStringAsFixed(1)}m\n"
+              "Status: ${late ? 'Terlambat' : 'Tepat Waktu'}";
+        }
         _statusColor = Colors.greenAccent;
       });
+    }
+
+    if (mounted && _isIzinMode) {
+      setState(() {
+        _isIzinMode = false;
+        _izinType = 'izin';
+      });
+    }
+
+    // Wajah valid + GPS sukses → tambah ke pool belajar.
+    // Hanya kalau distance ≤ 0.70 (strict) dan bukan mode izin.
+    if (!isIzin &&
+        _matchedEmbedding != null &&
+        _matchedDistance != null &&
+        _matchedDistance! <= 0.70) {
+      await _mobileFaceNetService.addLearningEmbedding(
+        _currentUserId!,
+        _matchedEmbedding!,
+        mode: _matchedMode ?? 'non_glasses',
+        matchDistance: _matchedDistance,
+      );
+    } else if (_matchedDistance != null) {
+      debugPrint("STREAM: skip learning "
+          "(distance=${_matchedDistance!.toStringAsFixed(4)}, isIzin=$isIzin)");
     }
   }
 
@@ -1234,6 +1415,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _lightSubscription?.cancel();
+    _onlineCheckTimer?.cancel();
     _stopWarmup();
     if (!_sessionLogged && _currentSessionUuid != null) {
       _finishSession(finalStatus: 'cancelled');
@@ -1244,108 +1426,302 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text("Menu Absen Wajah")),
-      body: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Center(
-                child: GestureDetector(
-                  onTap: _toggleOrStartCamera,
-                  child: Container(
-                    width: 300,
-                    height: 400,
-                    decoration: BoxDecoration(
-                      color: Colors.black,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: _isCameraActive ? Colors.green : Colors.grey.shade700,
-                        width: 3,
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        statusBarBrightness: Brightness.light,
+      ),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+        color: _isIzinMode ? const Color(0xFFD6CFC2) : AppColors.cream,
+        child: Scaffold(
+          backgroundColor: Colors.transparent,
+          appBar: AppBar(
+            title: const Text("Menu Absen"),
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            foregroundColor: AppColors.darkSlate,
+            systemOverlayStyle: const SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness: Brightness.dark,
+              statusBarBrightness: Brightness.light,
+            ),
+            actions: [
+              Padding(
+                padding: const EdgeInsets.only(right: 16),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: _isOnline ? AppColors.success : AppColors.error,
+                        shape: BoxShape.circle,
                       ),
                     ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(13),
-                      child: _isLoading
-                          ? const Center(child: CircularProgressIndicator(color: Colors.white))
-                          : _isCameraReady
-                              ? Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    FittedBox(
-                                      fit: BoxFit.cover,
-                                      child: SizedBox(
-                                        width: _controller!.value.previewSize!.height,
-                                        height: _controller!.value.previewSize!.width,
-                                        child: CameraPreview(_controller!),
-                                      ),
-                                    ),
-                                    Positioned(
-                                      bottom: 16, left: 16, right: 16,
-                                      child: Container(
-                                        padding: const EdgeInsets.all(8),
-                                        decoration: BoxDecoration(
-                                          color: Colors.black54,
-                                          borderRadius: BorderRadius.circular(8),
-                                        ),
-                                        child: Text(
-                                          _statusMessage,
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: _statusColor,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                )
-                              : Center(
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(16.0),
-                                    child: Text(
-                                      _statusMessage,
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(
-                                        color: _statusColor,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                  ),
-                                ),
+                    const SizedBox(width: 8),
+                    InkWell(
+                      onTap: _checkOnline,
+                      child: const Icon(Icons.refresh, color: AppColors.darkSlate),
                     ),
-                  ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 20),
-              if (_latestTelemetry != null) ...[
-                Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 24),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12.0),
-                    child: Column(
-                      children: [
-                        Text(
-                          "Status Matching",
-                          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey.shade700),
-                        ),
-                        const SizedBox(height: 4),
-                        Text("Euclidean Distance: ${_latestTelemetry!.distance.toStringAsFixed(4)}"),
-                        Text("Kemiripan: ${(_latestTelemetry!.similarity * 100).toStringAsFixed(1)}%"),
-                        Text("Mode Match: ${_latestTelemetry!.matchMode}"),
-                        Text("Total Terdaftar: ${_latestTelemetry!.totalRegisteredCount}"),
-                        Text("Cahaya (AUX): $_luxValue lux"),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
             ],
           ),
+          body: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 300),
+            switchInCurve: Curves.easeInOut,
+            switchOutCurve: Curves.easeInOut,
+            child: _isIzinMode
+                ? _buildIzinContent(key: const ValueKey('izin'))
+                : _buildNormalContent(key: const ValueKey('normal')),
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildNormalContent({Key? key}) {
+    return LayoutBuilder(
+      key: key,
+      builder: (context, constraints) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _buildCameraBox(borderColor: AppColors.tealMedium),
+                _buildNormalRow(),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIzinContent({Key? key}) {
+    return LayoutBuilder(
+      key: key,
+      builder: (context, constraints) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 96),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _buildCameraBox(borderColor: AppColors.maroon),
+                _buildIzinRow(),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCameraBox({required Color borderColor}) {
+    final enabled = _isCameraActive || _canStartCamera;
+
+    return Center(
+      child: GestureDetector(
+        onTap: _toggleOrStartCamera,
+        child: Opacity(
+          opacity: enabled ? 1.0 : 0.55,
+          child: Container(
+            width: MediaQuery.of(context).size.width * 0.85,
+            height: MediaQuery.of(context).size.width * 1.0 * 1.15,
+            decoration: BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: _isCameraActive ? AppColors.tealMedium : borderColor,
+                width: 3,
+              ),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(13),
+              child: _isLoading
+                  ? const Center(child: CircularProgressIndicator(color: Colors.white))
+                  : _isCameraReady
+                      ? Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            FittedBox(
+                              fit: BoxFit.cover,
+                              child: SizedBox(
+                                width: _controller!.value.previewSize!.height,
+                                height: _controller!.value.previewSize!.width,
+                                child: CameraPreview(_controller!),
+                              ),
+                            ),
+                            Positioned(
+                              bottom: 16, left: 16, right: 16,
+                              child: Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: Colors.black54,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  _statusMessage,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: _statusColor,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        )
+                      : Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16.0),
+                            child: Text(
+                              enabled ? _statusMessage : _disabledReason,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: _statusColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                        ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNormalRow() {
+    const double itemHeight = 48;
+
+    return SizedBox(
+      width: MediaQuery.of(context).size.width * 0.85,
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: _toggleIzinMode,
+            child: Container(
+              height: itemHeight,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: AppColors.maroon,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.pan_tool_alt, color: Colors.white, size: 18),
+                  SizedBox(width: 6),
+                  Text('Izin',
+                      style: TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              height: itemHeight,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: AppColors.creamDark,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                _isCameraActive ? _statusMessage : "Absen Tersedia",
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: AppColors.darkSlate,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildIzinRow() {
+    const double itemHeight = 48;
+    const double borderW = 1.5;
+
+    return SizedBox(
+      width: MediaQuery.of(context).size.width * 0.85,
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: _toggleIzinMode,
+            child: Container(
+              height: itemHeight,
+              width: itemHeight,
+              decoration: BoxDecoration(
+                color: AppColors.creamDark,
+                border: Border.all(color: AppColors.darkSlate, width: borderW),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.chevron_left, color: AppColors.darkSlate),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: GestureDetector(
+              onTap: _pickIzinType,
+              child: Container(
+                height: itemHeight,
+                decoration: BoxDecoration(
+                  color: AppColors.creamDark,
+                  border: Border.all(color: AppColors.darkSlate, width: borderW),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      _izinType == 'izin' ? Icons.pan_tool_alt : Icons.sick,
+                      color: AppColors.darkSlate,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _izinType == 'izin' ? 'Izin' : 'Sakit',
+                      style: const TextStyle(
+                        color: AppColors.darkSlate,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: _pickIzinType,
+            child: Container(
+              height: itemHeight,
+              width: itemHeight,
+              decoration: BoxDecoration(
+                color: AppColors.creamDark,
+                border: Border.all(color: AppColors.darkSlate, width: borderW),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.keyboard_arrow_down, color: AppColors.darkSlate),
+            ),
+          ),
+        ],
       ),
     );
   }

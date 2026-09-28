@@ -15,11 +15,11 @@ class SyncWatchdog {
 
   /// Interval antar-percobaan (detik).
   /// Index 0 = percobaan pertama (langsung).
-  /// Index 1 = setelah gagal pertama, tunggu 30s.
-  /// Index 2 = setelah gagal kedua, tunggu 60s.
-  /// Index 3 = 150s. Index 4+ = 300s (cap).
-  static const List<int> _intervalsSec = [0, 30, 60, 150, 300];
-  static const int _capIndex = 4;
+  /// Index 1 = setelah gagal pertama, tunggu 5s.
+  /// Index 2 = 15s. Index 3 = 30s. Index 4 = 60s. Index 5 = 150s.
+  /// Index 6+ = 300s (cap).
+  static const List<int> _intervalsSec = [0, 5, 15, 30, 60, 150, 300];
+  static const int _capIndex = 6;
 
   Timer? _timer;
   int _attemptIndex = 0;
@@ -35,7 +35,6 @@ class SyncWatchdog {
   ///
   /// Selalu reset backoff dan coba instan dulu.
   Future<void> notify() async {
-    // Cek pending dulu. Kalau tidak ada, tidak usah aktif.
     bool hasPending;
     try {
       hasPending = await DatabaseService.instance.hasAnyPending();
@@ -73,7 +72,6 @@ class SyncWatchdog {
     debugPrint("WATCHDOG: attempt #${_attemptIndex + 1}, next in ${delaySec}s");
 
     if (delaySec == 0) {
-      // Instan.
       _timer = Timer(Duration.zero, _tick);
     } else {
       _timer = Timer(delay, _tick);
@@ -84,6 +82,14 @@ class SyncWatchdog {
     if (_running) return;
     _running = true;
     try {
+      // 0. Kalau sync lain sedang jalan, tunggu sebentar, jangan tabrakan.
+      if (SyncService().isSyncing) {
+        debugPrint("WATCHDOG: sync sedang berjalan, tunggu 3s");
+        _timer?.cancel();
+        _timer = Timer(const Duration(seconds: 3), _tick);
+        return;
+      }
+
       // 1. Cek pending
       final hasPending = await DatabaseService.instance.hasAnyPending();
       if (!hasPending) {

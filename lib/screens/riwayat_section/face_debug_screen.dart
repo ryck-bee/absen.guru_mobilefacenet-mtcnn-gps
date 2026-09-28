@@ -90,6 +90,28 @@ class _FaceDebugScreenState extends State<FaceDebugScreen> {
     }
   }
 
+  Future<void> _shareLearningLog() async {
+    setState(() => _sharing = true);
+    try {
+      final file = await DebugLogger.instance.getLearningFile();
+      if (file == null || !await file.exists()) {
+        _showSnack("Belum ada learning log.");
+        return;
+      }
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'text/plain')],
+          subject: 'Learning Embeddings Log',
+          text: 'Learning log ${DateTime.now().toIso8601String()}',
+        ),
+      );
+    } catch (e) {
+      _showSnack("Error: $e");
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
   Future<void> _clearLogs() async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -137,6 +159,11 @@ class _FaceDebugScreenState extends State<FaceDebugScreen> {
               ),
             )
           else ...[
+            IconButton(
+              tooltip: "Share Learning Log",
+              icon: const Icon(Icons.school),
+              onPressed: _shareLearningLog,
+            ),
             IconButton(
               tooltip: "Share Log JSON",
               icon: const Icon(Icons.data_object),

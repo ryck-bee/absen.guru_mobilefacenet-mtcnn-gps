@@ -12,7 +12,7 @@ class DatabaseService {
   static final DatabaseService instance = DatabaseService._();
 
   Database? _db;
-  static const int _dbVersion = 6;
+  static const int _dbVersion = 8;
   static const String _dbName = 'absensi_wajah.db';
   static const _uuid = Uuid();
 
@@ -77,6 +77,7 @@ class DatabaseService {
         user_id TEXT NOT NULL,
         mode TEXT NOT NULL,
         embedding TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'registration',
         created_at TEXT NOT NULL,
         sync_status TEXT NOT NULL DEFAULT 'pending',
         synced_at TEXT
@@ -90,6 +91,7 @@ class DatabaseService {
         session_uuid TEXT,
         user_id TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
+        recorded_date TEXT,
         local_timestamp TEXT NOT NULL,
         lat REAL NOT NULL,
         lng REAL NOT NULL,
@@ -98,6 +100,8 @@ class DatabaseService {
         match_mode TEXT NOT NULL,
         connectivity_mode TEXT NOT NULL,
         is_late INTEGER NOT NULL DEFAULT 0,
+        is_izin INTEGER NOT NULL DEFAULT 0,
+        izin_type TEXT,
         photo_path TEXT,
         photo_url TEXT,
         sync_status TEXT NOT NULL DEFAULT 'pending',
@@ -300,6 +304,16 @@ class DatabaseService {
       await db.execute('ALTER TABLE session_logs_local ADD COLUMN photo_url TEXT');
       await db.execute('ALTER TABLE attendance_local ADD COLUMN photo_url TEXT');
     }
+
+    if (oldVersion < 7) {
+      await db.execute('ALTER TABLE attendance_local ADD COLUMN is_izin INTEGER NOT NULL DEFAULT 0');
+      await db.execute('ALTER TABLE attendance_local ADD COLUMN izin_type TEXT');
+      await db.execute('ALTER TABLE attendance_local ADD COLUMN recorded_date TEXT');
+    }
+
+    if (oldVersion < 8) {
+      await db.execute("ALTER TABLE embeddings_local ADD COLUMN source TEXT NOT NULL DEFAULT 'registration'");
+    }
   }
 
   // ============================================================
@@ -393,6 +407,7 @@ class DatabaseService {
     required String userId,
     required String mode,
     required List<double> embedding,
+    String source = 'registration',
   }) async {
     final db = await database;
     return await db.insert('embeddings_local', {
@@ -400,6 +415,7 @@ class DatabaseService {
       'user_id': userId,
       'mode': mode,
       'embedding': jsonEncode(embedding),
+      'source': source,
       'created_at': DateTime.now().toIso8601String(),
       'sync_status': 'pending',
     });
@@ -418,7 +434,9 @@ class DatabaseService {
   Future<List<Map<String, dynamic>>> getPendingEmbeddings() async {
     final db = await database;
     return await db.query('embeddings_local',
-        where: 'sync_status = ?', whereArgs: ['pending'], orderBy: 'created_at ASC');
+        where: "sync_status = ? AND source != 'learning'",
+        whereArgs: ['pending'],
+        orderBy: 'created_at ASC');
   }
 
   Future<void> markEmbeddingSynced(int id) async {
@@ -445,6 +463,34 @@ class DatabaseService {
     final db = await database;
     final r = await db.rawQuery("SELECT COUNT(*) as c FROM embeddings_local WHERE sync_status = 'pending'");
     return Sqflite.firstIntValue(r) ?? 0;
+  }
+
+    Future<int> countLearningEmbeddings(String userId) async {
+    final db = await database;
+    final r = await db.rawQuery(
+      "SELECT COUNT(*) as c FROM embeddings_local WHERE user_id = ? AND source = 'learning'",
+      [userId],
+    );
+    return Sqflite.firstIntValue(r) ?? 0;
+  }
+
+  Future<int?> getOldestLearningEmbeddingId(String userId) async {
+    final db = await database;
+    final rows = await db.query(
+      'embeddings_local',
+      columns: ['id'],
+      where: "user_id = ? AND source = 'learning'",
+      whereArgs: [userId],
+      orderBy: 'created_at ASC',
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first['id'] as int?;
+  }
+
+  Future<void> deleteEmbeddingById(int id) async {
+    final db = await database;
+    await db.delete('embeddings_local', where: 'id = ?', whereArgs: [id]);
   }
 
   // ============================================================
@@ -628,15 +674,24 @@ class DatabaseService {
     required String matchMode,
     required String connectivityMode,
     bool isLate = false,
+    bool isIzin = false,
+    String? izinType,
     String? sessionUuid,
     String? photoPath,
   }) async {
     final db = await database;
+
+    // recorded_date: YYYY-MM-DD dari recordedAt (waktu lokal).
+    final dateOnly = '${recordedAt.year.toString().padLeft(4, '0')}-'
+        '${recordedAt.month.toString().padLeft(2, '0')}-'
+        '${recordedAt.day.toString().padLeft(2, '0')}';
+
     return await db.insert('attendance_local', {
       'client_uuid': _uuid.v4(),
       'session_uuid': sessionUuid,
       'user_id': userId,
       'recorded_at': recordedAt.toIso8601String(),
+      'recorded_date': dateOnly,
       'local_timestamp': DateTime.now().toIso8601String(),
       'lat': lat,
       'lng': lng,
@@ -645,9 +700,29 @@ class DatabaseService {
       'match_mode': matchMode,
       'connectivity_mode': connectivityMode,
       'is_late': isLate ? 1 : 0,
+      'is_izin': isIzin ? 1 : 0,
+      'izin_type': izinType,
       'photo_path': photoPath,
       'sync_status': 'pending',
     });
+  }
+
+  /// Cek apakah user sudah absen/izin HARI INI.
+  /// Return row pertama jika ada, null jika belum.
+  Future<Map<String, dynamic>?> getTodayAttendance(String userId) async {
+    final db = await database;
+    final now = DateTime.now();
+    final dateOnly = '${now.year.toString().padLeft(4, '0')}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+
+    final rows = await db.query(
+      'attendance_local',
+      where: 'user_id = ? AND recorded_date = ?',
+      whereArgs: [userId, dateOnly],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
   }
 
   Future<List<Map<String, dynamic>>> getPendingAttendance() async {

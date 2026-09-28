@@ -6,6 +6,7 @@ import 'package:image/image.dart' as img;
 import 'package:tflite_flutter/tflite_flutter.dart';
 import '../../config/glasses_config.dart';
 import '../db/database_service.dart';
+import '../debug_logger.dart';
 
 /// Data wajah satu user — dipisah antara non-kacamata dan kacamata
 class UserFaceData {
@@ -431,6 +432,75 @@ class MobileFaceNetService {
       }
     } catch (e) {
       debugPrint("DEBUG_MOBILEFACENET: Gagal catat riwayat -> $e");
+    }
+  }
+
+  Future<bool> addLearningEmbedding(
+    String userId,
+    List<double> embedding, {
+    required String mode,
+    double? matchDistance,
+  }) async {
+    try {
+      // 1. Cek duplikat.
+      final existing = _registeredUsers[userId];
+      if (existing != null) {
+        final pool = <List<double>>[
+          ...existing.nonGlasses,
+          ...existing.glasses,
+        ];
+        for (final old in pool) {
+          final d = _euclideanDistance(embedding, old);
+          if (d < 0.3) {
+            debugPrint("MFN learn: duplikat (d=${d.toStringAsFixed(4)}), skip");
+            return false;
+          }
+        }
+      }
+
+      // 2. Cek batas 30.
+      final count = await DatabaseService.instance.countLearningEmbeddings(userId);
+      if (count >= 30) {
+        final oldestId = await DatabaseService.instance.getOldestLearningEmbeddingId(userId);
+        if (oldestId != null) {
+          await DatabaseService.instance.deleteEmbeddingById(oldestId);
+          debugPrint("MFN learn: max 30, hapus id=$oldestId (FIFO)");
+        }
+      }
+
+      // 3. Simpan ke DB.
+      await DatabaseService.instance.addEmbedding(
+        userId: userId,
+        mode: mode,
+        embedding: embedding,
+        source: 'learning',
+      );
+
+      // 4. Tambah ke memory.
+      final data = _registeredUsers.putIfAbsent(userId, () => UserFaceData());
+      if (mode == 'glasses') {
+        data.glasses.add(embedding);
+      } else {
+        data.nonGlasses.add(embedding);
+      }
+
+      // 5. Log ke file terpisah.
+      final label = mode == 'glasses' ? 'loose' : 'strict';
+      final first5 = embedding
+          .take(5)
+          .map((v) => v.toStringAsFixed(4))
+          .join(', ');
+      final totalBaru = count + 1;
+      await DebugLogger.instance.appendLearning(
+        'added mode=$label d=${matchDistance?.toStringAsFixed(4) ?? "?"} '
+        'total=$totalBaru first5=[$first5]',
+      );
+
+      debugPrint("MFN learn: tambah embedding ($label), total=$totalBaru");
+      return true;
+    } catch (e) {
+      debugPrint("MFN learn: error -> $e");
+      return false;
     }
   }
 

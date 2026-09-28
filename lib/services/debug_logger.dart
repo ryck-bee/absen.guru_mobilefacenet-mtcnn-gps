@@ -4,8 +4,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
-/// Logger yang capture semua debugPrint ke file.
-/// Export bisa dibagikan via WhatsApp.
 class DebugLogger {
   DebugLogger._();
   static final DebugLogger instance = DebugLogger._();
@@ -13,7 +11,8 @@ class DebugLogger {
   final List<String> _buffer = [];
   static const int _maxBufferLines = 5000;
   File? _logFile;
-  Timer? _flushTimer; 
+  File? _learningFile;
+  Timer? _flushTimer;
   bool _initialized = false;
   bool _capturing = false;
 
@@ -50,7 +49,6 @@ class DebugLogger {
 
   String _two(int n) => n.toString().padLeft(2, '0');
 
-  /// Dipanggil dari override debugPrint
   void append(String? message) {
     if (!_capturing || message == null) return;
     final ts = DateTime.now().toIso8601String();
@@ -69,10 +67,52 @@ class DebugLogger {
     } catch (_) {}
   }
 
-  /// Force flush (dipanggil sebelum export).
   Future<void> flushNow() => _flush();
 
-  /// Export semua log ke file JSON.
+  // ============================================================
+  // LEARNING LOG (file terpisah)
+  // ============================================================
+  Future<void> _ensureLearningFile() async {
+    if (_learningFile != null) return;
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final logDir = Directory('${dir.path}/logs');
+      if (!await logDir.exists()) await logDir.create(recursive: true);
+      _learningFile = File('${logDir.path}/learning_log.txt');
+      if (!await _learningFile!.exists()) {
+        await _learningFile!.writeAsString(
+          '=== LEARNING LOG START ${DateTime.now().toIso8601String()} ===\n',
+        );
+      }
+    } catch (e) {
+      debugPrintSynchronously('Learning log init error: $e');
+    }
+  }
+
+  /// Tulis satu baris ke file learning_log.txt.
+  Future<void> appendLearning(String line) async {
+    try {
+      await _ensureLearningFile();
+      if (_learningFile == null) return;
+      final ts = DateTime.now().toIso8601String();
+      await _learningFile!.writeAsString(
+        '[$ts] $line\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+    } catch (e) {
+      debugPrintSynchronously('Learning log append error: $e');
+    }
+  }
+
+  Future<File?> getLearningFile() async {
+    await _ensureLearningFile();
+    return _learningFile;
+  }
+
+  // ============================================================
+  // EXPORT
+  // ============================================================
   Future<File?> exportJson() async {
     await _flush();
     try {
@@ -113,7 +153,6 @@ class DebugLogger {
     }
   }
 
-  /// Export ringkas (text) untuk dibaca manusia.
   Future<File?> exportText() async {
     await _flush();
     try {
@@ -149,7 +188,6 @@ class DebugLogger {
     }
   }
 
-  /// Hapus semua log lama.
   Future<void> clearAll() async {
     _flushTimer?.cancel();
     await _flush();
@@ -161,14 +199,12 @@ class DebugLogger {
       }
       _buffer.clear();
       _logFile = null;
+      _learningFile = null;
       _initialized = false;
       await init();
     } catch (_) {}
   }
 
-  /// Jumlah baris di buffer (belum di-flush).
   int get bufferedLines => _buffer.length;
-
-  /// Path log file aktif.
   String? get activeFilePath => _logFile?.path;
 }

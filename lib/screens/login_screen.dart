@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
+import '../config/app_colors.dart';
+import '../config/app_spacing.dart';
 import '../services/db/supabase_service.dart';
+import '../widgets/loading_overlay.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -8,122 +12,347 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
+enum _PermStatus { checking, granted, denied }
+
 class _LoginScreenState extends State<LoginScreen> {
-  final _idController = TextEditingController();
+  final _nipController = TextEditingController();
   final _pwController = TextEditingController();
   final _service = SupabaseService();
 
   bool _loading = false;
-  String? _error;
+  bool _error = false;
+  String? _errorMessage;
 
-    Future<void> _login() async {
+  _PermStatus _permStatus = _PermStatus.checking;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkPermissions();
+    loadingController.hide();
+  }
+
+  Future<void> _checkPermissions() async {
+    setState(() => _permStatus = _PermStatus.checking);
+
+    final results = await [
+      Permission.camera,
+      Permission.locationWhenInUse,
+      Permission.notification,
+    ].request();
+
+    final allGranted = results.values.every((s) => s.isGranted);
+
+    if (!mounted) return;
+    setState(() {
+      _permStatus = allGranted ? _PermStatus.granted : _PermStatus.denied;
+    });
+  }
+
+  Future<void> _openAppSettings() async {
+    await openAppSettings();
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (mounted) await _checkPermissions();
+  }
+
+  Future<void> _login() async {
     if (_loading) return;
+    if (_permStatus != _PermStatus.granted) return;
+
     setState(() {
       _loading = true;
-      _error = null;
+      _error = false;
+      _errorMessage = null;
     });
 
     try {
+      loadingController.show();
       await _service.signIn(
-        identifier: _idController.text,
+        identifier: _nipController.text,
         password: _pwController.text,
       );
-      // AuthGate otomatis redirect. Tidak ada setState setelah ini.
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) {
+        setState(() {
+          _error = true;
+          _errorMessage = _parseError(e);
+        });
+      }
+      await loadingController.hide();
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
+  String _parseError(dynamic e) {
+    final msg = e.toString().toLowerCase();
+    if (msg.contains('invalid') ||
+        msg.contains('credential') ||
+        msg.contains('password')) {
+      return 'NIP atau Password salah!';
+    }
+    if (msg.contains('network') ||
+        msg.contains('socket') ||
+        msg.contains('connection')) {
+      return 'Tidak ada koneksi internet.';
+    }
+    return 'Login gagal. Coba lagi.';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
+    final keyboardOpen = keyboardHeight > 0;
+    final smallShift = keyboardOpen ? 20.0 : 0.0;
+    final bigShift = keyboardOpen ? 50.0 : 0.0;
+    final gutter = AppSpacing.horizontal(context);
+
     return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Center(
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.face, size: 72, color: Colors.blue),
-                  const SizedBox(height: 16),
-                  const Text(
-                    "Absensi Wajah Guru",
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-                  ),
-                  const Text(
-                    "SDN Gubrih 1",
-                    style: TextStyle(fontSize: 14, color: Colors.grey),
-                  ),
-                  const SizedBox(height: 40),
-
-                  TextField(
-                    controller: _idController,
-                    decoration: const InputDecoration(
-                      labelText: "NIP atau Email",
-                      hintText: "Contoh: 2010651111",
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.person),
+      backgroundColor: AppColors.cream,
+      resizeToAvoidBottomInset: false,
+      body: Stack(
+        fit: StackFit.expand,
+        clipBehavior: Clip.none,
+        children: [
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 280),
+            curve: Curves.easeInOut,
+            left: -60,
+            bottom: 220 + smallShift,
+            child: _blob(size: 200, color: const Color(0xFFDCC0CA)),
+          ),
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 280),
+            curve: Curves.easeInOut,
+            right: -70,
+            bottom: -20 + bigShift,
+            child: _blob(size: 420, color: const Color(0xFFDCC0CA)),
+          ),
+          Padding(
+            padding: EdgeInsets.only(bottom: keyboardHeight),
+            child: SafeArea(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(gutter, 24, gutter, 24),
+                child: Center(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (_error && _errorMessage != null) ...[
+                          Text(
+                            _errorMessage!,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: AppColors.error,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                        ],
+                        const Text(
+                          'Selamat Datang!',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 34,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.darkSlate,
+                            height: 1.15,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Silahkan masukkan NIP dan password\nyang sudah di sediakan!',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: AppColors.darkSlate.withOpacity(0.7),
+                            height: 1.4,
+                          ),
+                        ),
+                        const SizedBox(height: 56),
+                        _buildField(
+                          controller: _nipController,
+                          label: 'NIP',
+                          error: _error,
+                        ),
+                        const SizedBox(height: 28),
+                        _buildField(
+                          controller: _pwController,
+                          label: 'Password',
+                          obscure: true,
+                          error: _error,
+                          onSubmitted: (_) => _login(),
+                        ),
+                        const SizedBox(height: 40),
+                        _buildPermissionState(),
+                      ],
                     ),
-                    textInputAction: TextInputAction.next,
-                    enabled: !_loading,
                   ),
-                  const SizedBox(height: 16),
-
-                  TextField(
-                    controller: _pwController,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: "Password",
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.lock),
-                    ),
-                    enabled: !_loading,
-                    onSubmitted: (_) => _login(),
-                  ),
-
-                  if (_error != null) ...[
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: Colors.red.shade50,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.red.shade200),
-                      ),
-                      child: Text(
-                        _error!,
-                        style: TextStyle(color: Colors.red.shade900, fontSize: 13),
-                      ),
-                    ),
-                  ],
-
-                  const SizedBox(height: 24),
-
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: _loading ? null : _login,
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                      ),
-                      child: _loading
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Text("Masuk", style: TextStyle(fontSize: 16)),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPermissionState() {
+    switch (_permStatus) {
+      case _PermStatus.checking:
+        return const Column(
+          children: [
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: AppColors.tealMedium,
+              ),
+            ),
+            SizedBox(height: 12),
+            Text(
+              'Menyiapkan izin...',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                color: AppColors.hurufSecondary,
+              ),
+            ),
+          ],
+        );
+
+      case _PermStatus.denied:
+        return Column(
+          children: [
+            const Text(
+              'Aplikasi butuh izin Kamera, Lokasi, dan Notifikasi\nuntuk berfungsi.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 13,
+                color: AppColors.error,
+                fontWeight: FontWeight.w600,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Center(
+              child: SizedBox(
+                width: 240,
+                height: 52,
+                child: ElevatedButton(
+                  onPressed: _openAppSettings,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.maroon,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Text(
+                    'Buka Pengaturan HP',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+
+      case _PermStatus.granted:
+        return Center(
+          child: SizedBox(
+            width: 240,
+            height: 52,
+            child: ElevatedButton(
+              onPressed: _loading ? null : _login,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.tealMedium,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor:
+                    AppColors.tealMedium.withOpacity(0.5),
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: _loading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Text(
+                      'Login',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+            ),
+          ),
+        );
+    }
+  }
+
+  Widget _blob({required double size, required Color color}) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+      ),
+    );
+  }
+
+  Widget _buildField({
+    required TextEditingController controller,
+    required String label,
+    bool obscure = false,
+    bool error = false,
+    ValueChanged<String>? onSubmitted,
+  }) {
+    final lineColor = error ? AppColors.error : AppColors.darkSlate;
+
+    return TextField(
+      controller: controller,
+      obscureText: obscure,
+      enabled: !_loading,
+      onSubmitted: onSubmitted,
+      style: const TextStyle(
+        color: AppColors.darkSlate,
+        fontSize: 16,
+      ),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: TextStyle(
+          color: lineColor,
+          fontSize: 14,
+        ),
+        floatingLabelStyle: TextStyle(
+          color: lineColor,
+          fontWeight: FontWeight.w600,
+        ),
+        enabledBorder: UnderlineInputBorder(
+          borderSide: BorderSide(color: lineColor, width: 1.5),
+        ),
+        focusedBorder: UnderlineInputBorder(
+          borderSide: BorderSide(color: lineColor, width: 2),
+        ),
+        disabledBorder: UnderlineInputBorder(
+          borderSide: BorderSide(
+            color: lineColor.withOpacity(0.4),
+            width: 1.5,
           ),
         ),
       ),
@@ -132,7 +361,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   void dispose() {
-    _idController.dispose();
+    _nipController.dispose();
     _pwController.dispose();
     super.dispose();
   }

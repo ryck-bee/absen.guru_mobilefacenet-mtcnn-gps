@@ -6,8 +6,9 @@ import 'package:image/image.dart' as img;
 import 'package:light/light.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:flutter/services.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../services/db/database_service.dart';
 import '../../services/db/sync_service.dart';
 import '../../services/gps/gps_service.dart';
@@ -537,6 +538,21 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       return;
     }
 
+    // Cek GPS hanya saat mau START kamera (bukan saat stop).
+    if (!_isCameraActive) {
+      final gpsEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!gpsEnabled) {
+        debugPrint("STREAM: GPS service mati, kamera tidak bisa start");
+        if (mounted) {
+          setState(() {
+            _statusMessage = "GPS belum aktif.\nNyalakan GPS di pengaturan HP.";
+            _statusColor = Colors.redAccent;
+          });
+        }
+        return;
+      }
+    }
+
     if (_isCameraActive) {
       await _stopAndDisposeCamera();
       await _stopWarmup();
@@ -865,6 +881,24 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     await WakelockPlus.enable();
     debugPrint("WAKELOCK: enabled (GPS start)");
     _gpsActive = true;
+
+    // Minta permission GPS SEBELUM start foreground service (Android 14+).
+    final gpsReady = await _gpsService.isGpsReady();
+    if (!gpsReady) {
+      debugPrint("GPS: permission ditolak → batal");
+      _isProcessingGps = false;
+      _gpsActive = false;
+      await WakelockPlus.disable();
+      if (mounted) {
+        setState(() {
+          _statusMessage = "Izin lokasi diperlukan.\nAktifkan di pengaturan HP.";
+          _statusColor = Colors.redAccent;
+        });
+      }
+      await _finishSession(finalStatus: 'gps_failed', gpsResult: 'permission');
+      return;
+    }
+
     await MonotonicClock.startGpsService();
     debugPrint("FOREGROUND_SERVICE: start");
 

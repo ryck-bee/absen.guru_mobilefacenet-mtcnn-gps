@@ -8,13 +8,10 @@ import '../../services/db/sync_service.dart';
 import '../../services/model/history_entry.dart';
 import 'history_calendar_screen.dart';
 
-/// Global key untuk akses HistoryScreen dari MainScreen.
-/// Dipakai agar tombol kalender (FAB) bisa dipindah ke MainScreen.
-final GlobalKey<HistoryScreenState> historyScreenKey = GlobalKey<HistoryScreenState>();
+final GlobalKey<HistoryScreenState> historyScreenKey =
+    GlobalKey<HistoryScreenState>();
 
 class HistoryScreen extends StatefulWidget {
-  /// Kalau diisi, card tanggal ini akan auto-expand saat screen dibuka.
-  /// Dipakai saat balik dari kalender.
   final DateTime? initialExpandDate;
 
   const HistoryScreen({
@@ -34,10 +31,8 @@ class HistoryScreenState extends State<HistoryScreen> {
   DateTime _month = DateTime.now();
   bool _loading = true;
   bool _isOnline = false;
-  bool _showCalendar = false;
   String? _userId;
 
-  /// Set tanggal yang sedang di-expand (key = 'YYYY-MM-DD').
   final Set<String> _expandedDates = {};
 
   @override
@@ -56,7 +51,6 @@ class HistoryScreenState extends State<HistoryScreen> {
   }
 
   Future<void> _init() async {
-    // Bersihkan pending yang sudah lewat 72 jam (fire-and-forget).
     DatabaseService.instance.cleanupExpiredPending().catchError((_) => 0);
 
     final user = await DatabaseService.instance.getUser();
@@ -69,7 +63,6 @@ class HistoryScreenState extends State<HistoryScreen> {
     await _checkOnline();
     await _load();
 
-    // Auto-scroll ke tanggal yang di-expand (kalau dari kalender).
     if (widget.initialExpandDate != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _scrollToDate(widget.initialExpandDate!);
@@ -102,7 +95,6 @@ class HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
-  /// Trigger sync manual + reload.
   Future<void> _refresh() async {
     setState(() => _loading = true);
     try {
@@ -138,6 +130,7 @@ class HistoryScreenState extends State<HistoryScreen> {
   }
 
   bool get showCalendar => _showCalendar;
+  bool _showCalendar = false;
 
   void toggleCalendarFromParent() {
     setState(() => _showCalendar = !_showCalendar);
@@ -271,7 +264,7 @@ class HistoryScreenState extends State<HistoryScreen> {
 // ============================================================
 // CARD SATU HARI
 // ============================================================
-class HistoryCard extends StatelessWidget {
+class HistoryCard extends StatefulWidget {
   final HistoryEntry entry;
   final bool expanded;
   final VoidCallback onTap;
@@ -283,8 +276,51 @@ class HistoryCard extends StatelessWidget {
     required this.onTap,
   });
 
+  @override
+  State<HistoryCard> createState() => _HistoryCardState();
+}
+
+class _HistoryCardState extends State<HistoryCard>
+    with SingleTickerProviderStateMixin {
+  static const _animDuration = Duration(milliseconds: 260);
+
+  late final AnimationController _controller;
+  late final Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: _animDuration,
+      value: widget.expanded ? 1.0 : 0.0,
+    );
+    _animation = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant HistoryCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.expanded != oldWidget.expanded) {
+      if (widget.expanded) {
+        _controller.forward();
+      } else {
+        _controller.reverse();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
   Color get _cardColor {
-    switch (entry.status) {
+    switch (widget.entry.status) {
       case HistoryStatus.valid:
         return AppColors.tealMedium;
       case HistoryStatus.pending:
@@ -297,7 +333,7 @@ class HistoryCard extends StatelessWidget {
   }
 
   String get _title {
-    switch (entry.status) {
+    switch (widget.entry.status) {
       case HistoryStatus.valid:
         return 'Absen Valid';
       case HistoryStatus.pending:
@@ -314,10 +350,8 @@ class HistoryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic,
+      onTap: widget.onTap,
+      child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: _cardColor,
@@ -330,60 +364,138 @@ class HistoryCard extends StatelessWidget {
             ),
           ],
         ),
-        child: Column(
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _buildThumbnail(size: expanded ? 80 : 48),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: expanded
-                      ? _buildExpandedInfo()
-                      : _buildCollapsedInfo(),
-                ),
-              ],
-            ),
-            if (expanded && entry.status == HistoryStatus.pending) ...[
-              const SizedBox(height: 10),
-              Text(
-                'Diharapkan mencari koneksi internet sebelum kadaluarsa.',
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.7),
-                  fontSize: 11,
-                  fontStyle: FontStyle.italic,
-                ),
-              ),
-            ],
+            _buildThumbnail(),
+            const SizedBox(width: 12),
+            Expanded(child: _buildInfo()),
           ],
         ),
       ),
     );
   }
 
-  // ============================================================
-  // THUMBNAIL
-  // ============================================================
-  Widget _buildThumbnail({required double size}) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        width: size,
-        height: size,
-        child: _buildThumbnailContent(),
+  Widget _buildThumbnail() {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, _) {
+        final t = _animation.value;
+        final w = 48 + (80 - 48) * t;
+        final h = 48 + (107 - 48) * t;
+        return SizedBox(
+          width: w,
+          height: h,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: _buildThumbnailContent(),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildInfo() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Flexible(
+              child: Text(
+                _title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              _formatDateShort(widget.entry.date),
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.8),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        _buildExtras(),
+      ],
+    );
+  }
+
+  Widget _buildExtras() {
+    final entry = widget.entry;
+    final rows = <Widget>[];
+
+    if (entry.recordedAt != null) {
+      rows.add(_infoRow('Jam', _formatTime(entry.recordedAt!)));
+    }
+    if (entry.status == HistoryStatus.pending && entry.expiresAt != null) {
+      rows.add(_infoRow('Kadaluarsa', _formatDateShort(entry.expiresAt!)));
+    }
+    if (entry.distanceMeters != null) {
+      rows.add(_infoRow('Jarak GPS', '${entry.distanceMeters!.round()} m'));
+    }
+    if (entry.matchDistance != null) {
+      rows.add(_infoRow('Match', entry.matchDistance!.toStringAsFixed(4)));
+    }
+    if (entry.failedCount > 0) {
+      rows.add(_infoRow('Percobaan gagal', '${entry.failedCount}×'));
+    }
+    if (entry.status == HistoryStatus.pending) {
+      rows.add(Padding(
+        padding: const EdgeInsets.only(top: 10),
+        child: Text(
+          'Diharapkan mencari koneksi internet sebelum kadaluarsa.',
+          style: TextStyle(
+            color: Colors.white.withOpacity(0.7),
+            fontSize: 11,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      ));
+    }
+
+    if (rows.isEmpty) return const SizedBox.shrink();
+
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        return ClipRect(
+          child: Align(
+            alignment: Alignment.topLeft,
+            heightFactor: _animation.value,
+            child: child,
+          ),
+        );
+      },
+      child: Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: rows,
+        ),
       ),
     );
   }
 
   Widget _buildThumbnailContent() {
-    final path = entry.photoPath;
+    final path = widget.entry.photoPath;
     if (path != null) {
       final file = File(path);
       if (file.existsSync()) {
         return Image.file(
           file,
           fit: BoxFit.cover,
+          alignment: Alignment.center,
           gaplessPlayback: true,
           errorBuilder: (_, _, _) => _buildEmptyThumbnail(),
         );
@@ -402,84 +514,6 @@ class HistoryCard extends StatelessWidget {
           size: 24,
         ),
       ),
-    );
-  }
-
-  // ============================================================
-  // COLLAPSED — title + tanggal kanan
-  // ============================================================
-  Widget _buildCollapsedInfo() {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: Text(
-            _title,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Text(
-          _formatDateShort(entry.date),
-          style: TextStyle(
-            color: Colors.white.withOpacity(0.8),
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ============================================================
-  // EXPANDED — title + label-value
-  // ============================================================
-  Widget _buildExpandedInfo() {
-    final rows = <Widget>[
-      Text(
-        _title,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 15,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-      const SizedBox(height: 8),
-      _infoRow('Tanggal', _formatDateShort(entry.date)),
-    ];
-
-    if (entry.recordedAt != null) {
-      rows.add(_infoRow('Jam', _formatTime(entry.recordedAt!)));
-    }
-    if (entry.status == HistoryStatus.pending && entry.expiresAt != null) {
-      rows.add(_infoRow('Kadaluarsa', _formatDateShort(entry.expiresAt!)));
-    }
-    if (entry.distanceMeters != null) {
-      rows.add(_infoRow(
-        'Jarak GPS',
-        '${entry.distanceMeters!.round()} m',
-      ));
-    }
-    if (entry.matchDistance != null) {
-      rows.add(_infoRow(
-        'Match',
-        entry.matchDistance!.toStringAsFixed(4),
-      ));
-    }
-    if (entry.failedCount > 0) {
-      rows.add(_infoRow(
-        'Percobaan gagal',
-        '${entry.failedCount}×',
-      ));
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: rows,
     );
   }
 
@@ -510,9 +544,6 @@ class HistoryCard extends StatelessWidget {
     );
   }
 
-  // ============================================================
-  // FORMAT HELPER
-  // ============================================================
   String _formatDateShort(DateTime d) {
     final yy = (d.year % 100).toString().padLeft(2, '0');
     final mm = d.month.toString().padLeft(2, '0');

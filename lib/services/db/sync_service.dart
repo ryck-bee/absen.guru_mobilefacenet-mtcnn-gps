@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'database_service.dart';
 import '../monotonic_clock.dart';
+import '../../main.dart';
 
 class SyncResult {
   final int embeddingsSynced;
@@ -67,10 +68,80 @@ class SyncService {
 
   static const String _photoBucket = 'face_photos';
 
-  // Cache untuk isServerReachable
   DateTime? _lastReachableCheck;
   bool? _lastReachableResult;
   static const _reachableCacheDuration = Duration(seconds: 5);
+
+  /// Pastikan device terdaftar di Supabase. Insert/upsert sekali.
+  /// Return device UUID yang siap dipakai sebagai `device_id`.
+  Future<void> _ensureDeviceRegistered(String userId) async {
+    // Sudah ada di global? Skip.
+    if (gDeviceId.isNotEmpty) return;
+
+    // Cek lokal
+    final local = await DatabaseService.instance.getDeviceLocal();
+    if (local != null && (local['registered'] as int? ?? 0) == 1) {
+      final id = local['device_id'] as String?;
+      if (id != null && id.isNotEmpty) {
+        gDeviceId = id;
+        debugPrint("DEVICE: loaded from local, id=$gDeviceId");
+        return;
+      }
+    }
+
+    // Belum terdaftar. Coba insert ke Supabase.
+    if (gAndroidId.isEmpty) {
+      debugPrint("DEVICE: android_id kosong, skip register");
+      return;
+    }
+
+    try {
+      // Upsert: kalau android_id sudah ada, update user_id & return row
+      await _client.from('devices').upsert({
+        'user_id': userId,
+        'android_id': gAndroidId,
+        'model': gDeviceModel,
+        'brand': gDeviceBrand,
+        'android_version': gDeviceAndroid,
+      }, onConflict: 'android_id');
+
+      // Ambil id-nya
+      final row = await _client
+          .from('devices')
+          .select('id')
+          .eq('android_id', gAndroidId)
+          .maybeSingle();
+
+      if (row == null) {
+        debugPrint("DEVICE: gagal ambil id setelah upsert");
+        return;
+      }
+
+      gDeviceId = row['id'] as String;
+
+      await DatabaseService.instance.saveDeviceLocal(
+        deviceId: gDeviceId,
+        androidId: gAndroidId,
+        model: gDeviceModel,
+        brand: gDeviceBrand,
+        androidVersion: gDeviceAndroid,
+        registered: true,
+      );
+
+      debugPrint("DEVICE: registered, id=$gDeviceId");
+    } catch (e) {
+      debugPrint("DEVICE: register error -> $e");
+      // Simpan info tanpa device_id, biar bisa retry lain waktu
+      await DatabaseService.instance.saveDeviceLocal(
+        deviceId: null,
+        androidId: gAndroidId,
+        model: gDeviceModel,
+        brand: gDeviceBrand,
+        androidVersion: gDeviceAndroid,
+        registered: false,
+      );
+    }
+  }
 
   /// Sync semua pending data ke Supabase.
   Future<SyncResult> syncAll() async {
@@ -97,6 +168,9 @@ class SyncService {
     int photoOk = 0, photoFail = 0;
 
     try {
+      // === 0. DEVICE REGISTRATION ===
+      await _ensureDeviceRegistered(userId);
+
       // === 1. EMBEDDINGS ===
       final pendingEmb = await DatabaseService.instance.getPendingEmbeddings();
       debugPrint("SYNC: ${pendingEmb.length} embedding pending");
@@ -222,6 +296,8 @@ class SyncService {
   // ============================================================
   // UPLOAD helpers
   // ============================================================
+  String? get _deviceIdOrNull => gDeviceId.isEmpty ? null : gDeviceId;
+
   Future<bool> _uploadEmbedding(Map<String, dynamic> row) async {
     final clientUuid = row['client_uuid'] as String?;
     if (clientUuid == null) return true;
@@ -233,6 +309,7 @@ class SyncService {
         'mode': row['mode'],
         'embedding': jsonDecode(row['embedding'] as String),
         'created_at': row['created_at'],
+        'device_id': _deviceIdOrNull,
       });
       return true;
     } on PostgrestException catch (e) {
@@ -275,6 +352,7 @@ class SyncService {
         'device_uptime_ms': row['device_uptime_ms'],
         'device_boot_time_ms': row['device_boot_time_ms'],
         'lux_value': row['lux_value'],
+        'device_id': _deviceIdOrNull,
       });
       return true;
     } on PostgrestException catch (e) {
@@ -304,6 +382,7 @@ class SyncService {
         'mfn_ms': row['mfn_ms'],
         'match_distance': row['match_distance'],
         'lux_value': row['lux_value'],
+        'device_id': _deviceIdOrNull,
       });
       return true;
     } on PostgrestException catch (e) {
@@ -334,6 +413,7 @@ class SyncService {
         'accuracy_meters': row['accuracy_meters'],
         'distance_to_school': row['distance_to_school'],
         'duration_ms': row['duration_ms'],
+        'device_id': _deviceIdOrNull,
       });
       return true;
     } on PostgrestException catch (e) {
@@ -367,6 +447,7 @@ class SyncService {
         'is_izin': (row['is_izin'] as int? ?? 0) == 1,
         'izin_type': row['izin_type'],
         'photo_url': photoUrl,
+        'device_id': _deviceIdOrNull,
       });
       return true;
     } on PostgrestException catch (e) {
@@ -434,8 +515,6 @@ class SyncService {
     }
   }
 
-  /// Cek apakah server reachable (real ping ke Supabase).
-  /// Hasil di-cache 5 detik supaya tidak spam.
   Future<bool> isServerReachable({bool useCache = true}) async {
     if (useCache && _lastReachableCheck != null) {
       final age = DateTime.now().difference(_lastReachableCheck!);

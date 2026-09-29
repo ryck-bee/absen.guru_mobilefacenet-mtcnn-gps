@@ -12,7 +12,7 @@ class DatabaseService {
   static final DatabaseService instance = DatabaseService._();
 
   Database? _db;
-  static const int _dbVersion = 8;
+  static const int _dbVersion = 9;
   static const String _dbName = 'absensi_wajah.db';
   static const _uuid = Uuid();
 
@@ -45,7 +45,7 @@ class DatabaseService {
   }
 
   // ============================================================
-  // SCHEMA v6
+  // SCHEMA
   // ============================================================
   Future<void> _onCreate(Database db, int version) async {
     await db.execute('''
@@ -191,6 +191,18 @@ class DatabaseService {
       )
     ''');
 
+    await db.execute('''
+      CREATE TABLE device_local (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        device_id TEXT,
+        android_id TEXT,
+        model TEXT,
+        brand TEXT,
+        android_version TEXT,
+        registered INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+
     await db.execute('CREATE INDEX idx_embeddings_sync ON embeddings_local(sync_status)');
     await db.execute('CREATE INDEX idx_attendance_sync ON attendance_local(sync_status)');
     await db.execute('CREATE INDEX idx_session_logs_sync ON session_logs_local(sync_status)');
@@ -314,6 +326,49 @@ class DatabaseService {
     if (oldVersion < 8) {
       await db.execute("ALTER TABLE embeddings_local ADD COLUMN source TEXT NOT NULL DEFAULT 'registration'");
     }
+
+    if (oldVersion < 9) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS device_local (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          device_id TEXT,
+          android_id TEXT,
+          model TEXT,
+          brand TEXT,
+          android_version TEXT,
+          registered INTEGER NOT NULL DEFAULT 0
+        )
+      ''');
+    }
+  }
+
+  // ============================================================
+  // DEVICE LOCAL
+  // ============================================================
+  Future<Map<String, dynamic>?> getDeviceLocal() async {
+    final db = await database;
+    final rows = await db.query('device_local', where: 'id = 1', limit: 1);
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  Future<void> saveDeviceLocal({
+    required String? deviceId,
+    required String androidId,
+    required String model,
+    required String brand,
+    required String androidVersion,
+    required bool registered,
+  }) async {
+    final db = await database;
+    await db.insert('device_local', {
+      'id': 1,
+      'device_id': deviceId,
+      'android_id': androidId,
+      'model': model,
+      'brand': brand,
+      'android_version': androidVersion,
+      'registered': registered ? 1 : 0,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   // ============================================================
@@ -428,7 +483,8 @@ class DatabaseService {
     final db = await database;
     final where = mode != null ? 'user_id = ? AND mode = ?' : 'user_id = ?';
     final whereArgs = mode != null ? [userId, mode] : [userId];
-    return await db.query('embeddings_local', where: where, whereArgs: whereArgs, orderBy: 'created_at ASC');
+    return await db.query('embeddings_local',
+        where: where, whereArgs: whereArgs, orderBy: 'created_at ASC');
   }
 
   Future<List<Map<String, dynamic>>> getPendingEmbeddings() async {
@@ -465,7 +521,7 @@ class DatabaseService {
     return Sqflite.firstIntValue(r) ?? 0;
   }
 
-    Future<int> countLearningEmbeddings(String userId) async {
+  Future<int> countLearningEmbeddings(String userId) async {
     final db = await database;
     final r = await db.rawQuery(
       "SELECT COUNT(*) as c FROM embeddings_local WHERE user_id = ? AND source = 'learning'",
@@ -681,7 +737,6 @@ class DatabaseService {
   }) async {
     final db = await database;
 
-    // recorded_date: YYYY-MM-DD dari recordedAt (waktu lokal).
     final dateOnly = '${recordedAt.year.toString().padLeft(4, '0')}-'
         '${recordedAt.month.toString().padLeft(2, '0')}-'
         '${recordedAt.day.toString().padLeft(2, '0')}';
@@ -707,8 +762,6 @@ class DatabaseService {
     });
   }
 
-  /// Cek apakah user sudah absen/izin HARI INI.
-  /// Return row pertama jika ada, null jika belum.
   Future<Map<String, dynamic>?> getTodayAttendance(String userId) async {
     final db = await database;
     final now = DateTime.now();
@@ -755,7 +808,7 @@ class DatabaseService {
   }
 
   // ============================================================
-  // PENDING CHECK (untuk SyncWatchdog)
+  // PENDING CHECK
   // ============================================================
   Future<bool> hasAnyPending() async {
     final db = await database;
@@ -886,7 +939,8 @@ class DatabaseService {
     await db.delete('face_attempts_local');
     await db.delete('gps_attempts_local');
     await db.delete('trusted_time_anchor_local');
-    debugPrint("DB: All tables cleared");
+    // device_local TIDAK dihapus — device tetap terdaftar di HP ini
+    debugPrint("DB: All tables cleared (device_local kept)");
   }
 
   Future<void> close() async {

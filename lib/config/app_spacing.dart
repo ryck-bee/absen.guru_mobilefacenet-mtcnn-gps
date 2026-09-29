@@ -17,7 +17,7 @@ class AppSpacing {
   }
 
     /// Breakpoint: lebar layar di bawah ini dianggap "kecil".
-  static const double compactBreakpoint = 350.0;
+  static const double compactBreakpoint = 380.0;
 
   /// Skala pengecilan navbar + FAB di layar kecil.
   static const double compactScale = 0.9;

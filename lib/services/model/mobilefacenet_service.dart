@@ -255,8 +255,8 @@ class MobileFaceNetService {
     }
   }
 
-  /// Load semua embedding dari SQLite lokal ke memory.
-  /// Dipanggil setelah login / app restart.
+  /// Load embedding dari SQLite ke memory.
+  /// Batasi: max 3 registrasi per mode, max 30 learning per mode.
   Future<void> loadFromDatabase() async {
     try {
       final user = await DatabaseService.instance.getUser();
@@ -271,7 +271,44 @@ class MobileFaceNetService {
       _registeredUsers.clear();
       _registeredThumbnails.clear();
 
+      // Kelompokkan
+      final regNon = <Map<String, dynamic>>[];
+      final regGls = <Map<String, dynamic>>[];
+      final learnNon = <Map<String, dynamic>>[];
+      final learnGls = <Map<String, dynamic>>[];
+
       for (final row in rows) {
+        final source = (row['source'] as String?) ?? 'registration';
+        final mode = row['mode'] as String;
+        if (source == 'learning') {
+          (mode == 'glasses' ? learnGls : learnNon).add(row);
+        } else {
+          (mode == 'glasses' ? regGls : regNon).add(row);
+        }
+      }
+
+      // Ambil terbaru: registrasi max 3 per mode, learning max 30 per mode
+      List<Map<String, dynamic>> takeLatest(
+        List<Map<String, dynamic>> list,
+        int n,
+      ) {
+        final sorted = List<Map<String, dynamic>>.from(list)
+          ..sort((a, b) {
+            final at = (a['created_at'] as String?) ?? '';
+            final bt = (b['created_at'] as String?) ?? '';
+            return bt.compareTo(at);
+          });
+        return sorted.take(n).toList();
+      }
+
+      final keep = [
+        ...takeLatest(regNon, 3),
+        ...takeLatest(regGls, 3),
+        ...takeLatest(learnNon, 30),
+        ...takeLatest(learnGls, 30),
+      ];
+
+      for (final row in keep) {
         final mode = row['mode'] as String;
         final embRaw = jsonDecode(row['embedding'] as String) as List;
         final emb = embRaw.map((v) => (v as num).toDouble()).toList();
@@ -294,7 +331,8 @@ class MobileFaceNetService {
         }
       }
 
-      debugPrint("MFN load: ${rows.length} embedding untuk user $userId");
+      debugPrint(
+          "MFN load: ${keep.length} embedding (dari ${rows.length} total) untuk user $userId");
     } catch (e) {
       debugPrint("MFN load ERROR: $e");
     }

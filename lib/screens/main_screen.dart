@@ -1,14 +1,13 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'absen_section/stream_screen.dart';
 import 'profile_section/profil_screen.dart';
+import 'profile_section/test_screen.dart';
 import '../config/app_colors.dart';
 import '../config/app_spacing.dart';
 import '../services/db/database_service.dart';
 import '../services/db/supabase_service.dart';
 import '../services/db/sync_service.dart';
-import '../services/model/mobilefacenet_service.dart';
 import '../services/net-service/network_monitor.dart';
 import '../services/net-service/sync_watchdog.dart';
 import '../widgets/bottom_navbar.dart';
@@ -24,8 +23,7 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  int _currentIndex = 1; // Default Absen (index 1)
-  bool _bootstrapping = false;
+  int _currentIndex = 1;
 
   @override
   void initState() {
@@ -36,69 +34,13 @@ class _MainScreenState extends State<MainScreen> {
     });
     NetworkMonitor.start();
 
-    _bootstrapSession();
+    _refreshSekolahAndSync();
   }
 
   @override
   void dispose() {
     NetworkMonitor.stop();
     super.dispose();
-  }
-
-  Future<void> _bootstrapSession() async {
-    setState(() => _bootstrapping = true);
-
-    try {
-      final dbUser = await DatabaseService.instance.getUser();
-
-      if (dbUser == null) {
-        debugPrint("BOOTSTRAP: Fetch profile + sekolah dari Supabase (first time)");
-        final profile = await SupabaseService().getProfile();
-        final sekolah = await SupabaseService().getSekolah();
-
-        if (profile == null) {
-          debugPrint("BOOTSTRAP ERROR: profile null");
-          return;
-        }
-        if (sekolah == null) {
-          debugPrint("BOOTSTRAP ERROR: sekolah null");
-          return;
-        }
-
-        await DatabaseService.instance.saveUser(
-          userId: profile['id'] as String,
-          nip: (profile['nip'] as String?) ?? '',
-          namaLengkap: (profile['nama_lengkap'] as String?) ?? 'Tanpa Nama',
-          role: (profile['role'] as String?) ?? 'guru',
-          sekolahId: profile['sekolah_id'] as String?,
-        );
-
-        await DatabaseService.instance.saveSekolah(
-          sekolahId: sekolah['id'] as String,
-          nama: sekolah['nama'] as String,
-          lat: (sekolah['lat'] as num).toDouble(),
-          lng: (sekolah['lng'] as num).toDouble(),
-          radiusMeters: (sekolah['radius_meters'] as num).toDouble(),
-        );
-
-        debugPrint("BOOTSTRAP: Data tersimpan. "
-            "user=${profile['nip']}, "
-            "sekolah=${sekolah['nama']}, "
-            "radius=${sekolah['radius_meters']}m");
-      } else {
-        debugPrint("BOOTSTRAP: User sudah ada (${dbUser['nama_lengkap']})");
-      }
-
-      await MobileFaceNetService().loadFromDatabase();
-
-      if (mounted) setState(() => _bootstrapping = false);
-
-      _refreshSekolahAndSync();
-
-    } catch (e) {
-      debugPrint("BOOTSTRAP ERROR: $e");
-      if (mounted) setState(() => _bootstrapping = false);
-    }
   }
 
   Future<void> _refreshSekolahAndSync() async {
@@ -115,27 +57,30 @@ class _MainScreenState extends State<MainScreen> {
           lng: (sekolah['lng'] as num).toDouble(),
           radiusMeters: (sekolah['radius_meters'] as num).toDouble(),
         );
-        debugPrint("BOOTSTRAP: sekolah di-refresh dari Supabase, "
-            "radius=${sekolah['radius_meters']}m");
       }
     } catch (e) {
-      debugPrint("BOOTSTRAP: refresh sekolah gagal (offline?) -> $e");
+      debugPrint("MAIN: refresh sekolah gagal -> $e");
     }
 
     SyncService().syncAll().then((r) {
-      debugPrint("BOOTSTRAP: sync result = $r");
+      debugPrint("MAIN: sync result = $r");
       SyncWatchdog().notify();
     });
   }
 
+  void _openTest() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TestScreen(cameras: widget.cameras),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (_bootstrapping) {
-      return const Scaffold(
-        backgroundColor: AppColors.cream,
-        body: Center(child: CircularProgressIndicator()),
-      );
-    }
+    final showCalendarFab = _currentIndex == 2;
+    final showTestFab = _currentIndex == 0;
 
     return Scaffold(
       backgroundColor: AppColors.cream,
@@ -143,21 +88,26 @@ class _MainScreenState extends State<MainScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          IndexedStack(
-            index: _currentIndex,
-            children: [
-              ProfilScreen(cameras: widget.cameras),
-              StreamScreen(
-                cameras: widget.cameras,
-                isActive: _currentIndex == 1,
-              ),
-              HistoryScreen(key: historyScreenKey),
-            ],
+          _buildTab(0, ProfilScreen(cameras: widget.cameras)),
+          _buildTab(
+            1,
+            StreamScreen(
+              cameras: widget.cameras,
+              isActive: _currentIndex == 1,
+            ),
           ),
-          if (_currentIndex == 2)
-            Positioned(
-              right: AppSpacing.horizontal(context),
-              bottom: MediaQuery.of(context).padding.bottom + 13,
+          _buildTab(2, HistoryScreen(key: historyScreenKey)),
+
+          // FAB calendar — KANAN (tab riwayat)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeInOut,
+            right: showCalendarFab
+                ? AppSpacing.horizontal(context)
+                : -100,
+            bottom: MediaQuery.of(context).padding.bottom + 13,
+            child: IgnorePointer(
+              ignoring: !showCalendarFab,
               child: Material(
                 color: (historyScreenKey.currentState?.showCalendar ?? false)
                     ? AppColors.tealMedium
@@ -184,6 +134,36 @@ class _MainScreenState extends State<MainScreen> {
                 ),
               ),
             ),
+          ),
+
+          // FAB test — KIRI (tab pengaturan)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeInOut,
+            left: showTestFab ? AppSpacing.horizontal(context) : -100,
+            bottom: MediaQuery.of(context).padding.bottom + 13,
+            child: IgnorePointer(
+              ignoring: !showTestFab,
+              child: Material(
+                color: AppColors.maroon,
+                shape: const CircleBorder(),
+                elevation: 4,
+                child: InkWell(
+                  onTap: _openTest,
+                  customBorder: const CircleBorder(),
+                  child: SizedBox(
+                    width: AppSpacing.fabSize(context),
+                    height: AppSpacing.fabSize(context),
+                    child: Icon(
+                      Icons.code,
+                      color: Colors.white,
+                      size: AppSpacing.fabIconSize(context),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
       bottomNavigationBar: BottomNavbar(
@@ -191,6 +171,27 @@ class _MainScreenState extends State<MainScreen> {
         onTap: (index) {
           setState(() => _currentIndex = index);
         },
+      ),
+    );
+  }
+
+  Widget _buildTab(int index, Widget child) {
+    Offset offset;
+    if (index == _currentIndex) {
+      offset = Offset.zero;
+    } else if (index < _currentIndex) {
+      offset = const Offset(-1.0, 0.0);
+    } else {
+      offset = const Offset(1.0, 0.0);
+    }
+
+    return AnimatedSlide(
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeInOutCubic,
+      offset: offset,
+      child: IgnorePointer(
+        ignoring: _currentIndex != index,
+        child: child,
       ),
     );
   }

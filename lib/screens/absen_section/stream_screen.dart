@@ -1434,7 +1434,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     if (!isIzin &&
         _matchedEmbedding != null &&
         _matchedDistance != null &&
-        _matchedDistance! <= 0.70) {
+        _matchedDistance! <= 0.75) {
       await _mobileFaceNetService.addLearningEmbedding(
         _currentUserId!,
         _matchedEmbedding!,

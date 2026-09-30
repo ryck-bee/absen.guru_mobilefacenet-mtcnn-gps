@@ -1,600 +1,699 @@
-import 'dart:math';
-import 'dart:typed_data';
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
-import 'package:tflite_flutter/tflite_flutter.dart';
-
-class _Face {
-  final Rect box;
-  final List<Point<double>> landmarks;
-  final double score;
-  _Face({required this.box, required this.landmarks, required this.score});
-}
-
-class _RawBox {
-  double x1, y1, x2, y2, score;
-  _RawBox(this.x1, this.y1, this.x2, this.y2, this.score);
-}
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../config/app_colors.dart';
+import '../../config/app_spacing.dart';
+import '../../services/db/database_service.dart';
+import '../../services/gps/gps_service.dart';
+import '../../services/model/mobilefacenet_service.dart';
+import '../../services/model/mtcnn_service.dart';
+import '../../main.dart';
 
 class TestScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
   const TestScreen({super.key, required this.cameras});
+
   @override
   State<TestScreen> createState() => _TestScreenState();
 }
 
-class _TestScreenState extends State<TestScreen> with WidgetsBindingObserver {
-  CameraController? _controller;
-  bool _busy = false;
-  String _status = "Menyiapkan...";
+class _FaceProcessResult {
+  final int? mtcnnMs;
+  final int? mfnMs;
+  _FaceProcessResult(this.mtcnnMs, this.mfnMs);
+}
 
-  Interpreter? _pnet;
-  Interpreter? _rnet;
-  Interpreter? _onet;
+class _TestScreenState extends State<TestScreen> {
+  bool _running = false;
+  String _progress = '';
+  String? _result;
+  int _perPhoto = 10;
 
-  static const int kPNetSize = 240;
+  static const _positives = [
+    'assets/benchmark/sample1.jpg',
+    'assets/benchmark/sample2.jpg',
+    'assets/benchmark/sample3.jpg',
+  ];
+  static const _negatives = [
+    'assets/benchmark/neg1.jpg',
+  ];
 
-  String _modelInfo = "Belum dimuat";
-  Uint8List? _resultPng;
-  String _meta = "";
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _init();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused ||
-        state == AppLifecycleState.detached) {
-      _disposeCamera();
-    } else if (state == AppLifecycleState.resumed) {
-      _initCamera();
-    }
-  }
-
-  Future<void> _disposeCamera() async {
-    final c = _controller;
-    _controller = null;
-    if (c != null) {
-      try {
-        await c.dispose();
-      } catch (_) {}
-    }
-    if (mounted) setState(() {});
-  }
-
-  Future<void> _initCamera() async {
-    if (_controller != null && _controller!.value.isInitialized) return;
-    try {
-      final front = widget.cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.front,
-        orElse: () => widget.cameras.first,
-      );
-      final c = CameraController(front, ResolutionPreset.high, enableAudio: false);
-      await c.initialize();
-      if (!mounted) {
-        await c.dispose();
-        return;
-      }
-      setState(() {
-        _controller = c;
-        _status = "Siap. Tekan tombol.";
-      });
-    } catch (e) {
-      if (mounted) setState(() => _status = "Gagal buka kamera: $e");
-    }
-  }
-
-  Future<void> _init() async {
+  // ============================================================
+  // FACE SPEED BENCHMARK
+  // ============================================================
+  Future<void> _runFaceBenchmark(int perPhoto) async {
     setState(() {
-      _busy = true;
-      _status = "Memuat model TFLite...";
-    });
-
-    final log = StringBuffer();
-    final opts = InterpreterOptions()..threads = 4;
-
-    try {
-      _pnet = await Interpreter.fromAsset('assets/models/pnet.tflite', options: opts);
-      _pnet!.allocateTensors();
-      log.writeln("P-Net OK");
-    } catch (e) {
-      log.writeln("P-Net FAIL: $e");
-    }
-    try {
-      _rnet = await Interpreter.fromAsset('assets/models/rnet.tflite', options: opts);
-      _rnet!.allocateTensors();
-      log.writeln("R-Net OK");
-    } catch (e) {
-      log.writeln("R-Net FAIL: $e");
-    }
-    try {
-      _onet = await Interpreter.fromAsset('assets/models/onet.tflite', options: opts);
-      _onet!.allocateTensors();
-      log.writeln("O-Net OK");
-    } catch (e) {
-      log.writeln("O-Net FAIL: $e");
-    }
-
-    _modelInfo = log.toString();
-
-    if (_pnet == null || _rnet == null || _onet == null) {
-      setState(() {
-        _busy = false;
-        _status = "Sebagian model gagal dimuat.";
-      });
-      return;
-    }
-
-    await _initCamera();
-    if (mounted) setState(() => _busy = false);
-  }
-
-  List<List<List<List<double>>>> _imageToInput(img.Image image, double mean, double std) {
-    final w = image.width;
-    final h = image.height;
-    final bytes = image.getBytes(order: img.ChannelOrder.rgb);
-    return List.generate(1, (_) => List.generate(h, (y) => List.generate(w, (x) {
-      final i = (y * w + x) * 3;
-      return [
-        (bytes[i] - mean) / std,
-        (bytes[i + 1] - mean) / std,
-        (bytes[i + 2] - mean) / std,
-      ];
-    })));
-  }
-
-  dynamic _zeros(List<int> shape) {
-    if (shape.length == 1) return List.filled(shape[0], 0.0);
-    if (shape.length == 2) {
-      return List.generate(shape[0], (_) => List.filled(shape[1], 0.0));
-    }
-    if (shape.length == 3) {
-      return List.generate(shape[0], (_) => List.generate(shape[1], (_) => List.filled(shape[2], 0.0)));
-    }
-    if (shape.length == 4) {
-      return List.generate(shape[0], (_) => List.generate(shape[1], (_) => List.generate(shape[2], (_) => List.filled(shape[3], 0.0))));
-    }
-    throw Exception("Unsupported shape $shape");
-  }
-
-  double _iou(_RawBox a, _RawBox b) {
-    final interX1 = max(a.x1, b.x1);
-    final interY1 = max(a.y1, b.y1);
-    final interX2 = min(a.x2, b.x2);
-    final interY2 = min(a.y2, b.y2);
-    final inter = max(0.0, interX2 - interX1) * max(0.0, interY2 - interY1);
-    final areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
-    final areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
-    return inter / (areaA + areaB - inter + 1e-9);
-  }
-
-  List<_RawBox> _nms(List<_RawBox> boxes, double thresh) {
-    if (boxes.isEmpty) return [];
-    boxes.sort((a, b) => b.score.compareTo(a.score));
-    final picked = <_RawBox>[];
-    final active = List.filled(boxes.length, true);
-    for (int i = 0; i < boxes.length; i++) {
-      if (!active[i]) continue;
-      picked.add(boxes[i]);
-      for (int j = i + 1; j < boxes.length; j++) {
-        if (active[j] && _iou(boxes[i], boxes[j]) > thresh) active[j] = false;
-      }
-    }
-    return picked;
-  }
-
-  List<_RawBox> _resizeToSquare(List<_RawBox> boxes) {
-    final out = <_RawBox>[];
-    for (final b in boxes) {
-      final w = b.x2 - b.x1;
-      final h = b.y2 - b.y1;
-      final side = max(w, h);
-      final nx1 = b.x1 + w * 0.5 - side * 0.5;
-      final ny1 = b.y1 + h * 0.5 - side * 0.5;
-      final nx2 = nx1 + side;
-      final ny2 = ny1 + side;
-      out.add(_RawBox(nx1, ny1, nx2, ny2, b.score));
-    }
-    return out;
-  }
-
-  List<_RawBox> _runPNet(img.Image image, {double threshold = 0.6}) {
-    final sw = Stopwatch()..start();
-
-    final int side = min(image.width, image.height);
-    final int cx = image.width ~/ 2;
-    final int cy = image.height ~/ 2;
-    final int cropX = cx - side ~/ 2;
-    final int cropY = cy - side ~/ 2;
-    final square = img.copyCrop(image, x: cropX, y: cropY, width: side, height: side);
-
-    int idxClass = -1, idxBbox = -1;
-    final outs = _pnet!.getOutputTensors();
-    for (int i = 0; i < outs.length; i++) {
-      final last = outs[i].shape.last;
-      if (last == 2) idxClass = i;
-      else if (last == 4) idxBbox = i;
-    }
-    final outClassShape = _pnet!.getOutputTensor(idxClass).shape;
-    final outBboxShape = _pnet!.getOutputTensor(idxBbox).shape;
-    final int oh = outClassShape[1];
-    final int ow = outClassShape[2];
-
-    // 6 skala — penting untuk deteksi wajah di berbagai ukuran
-    final scales = [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125];
-
-    final candidates = <_RawBox>[];
-    double globalMaxProb = 0;
-
-    for (final s in scales) {
-      final int sw2 = (side * s).round();
-      final int sh2 = (side * s).round();
-      if (sw2 < 16 || sh2 < 16) continue;
-
-      final scaled = img.copyResize(square, width: sw2, height: sh2);
-
-      final padded = img.Image(width: kPNetSize, height: kPNetSize);
-      for (int y = 0; y < kPNetSize; y++) {
-        for (int x = 0; x < kPNetSize; x++) {
-          if (x < sw2 && y < sh2) {
-            final p = scaled.getPixel(x, y);
-            padded.setPixelRgb(x, y, p.r.toInt(), p.g.toInt(), p.b.toInt());
-          } else {
-            padded.setPixelRgb(x, y, 0, 0, 0);
-          }
-        }
-      }
-
-      final input = _imageToInput(padded, 127.5, 127.5);
-      final outClass = _zeros(outClassShape);
-      final outBbox = _zeros(outBboxShape);
-      _pnet!.runForMultipleInputs([input], {idxClass: outClass, idxBbox: outBbox});
-
-      final double invScale = 1.0 / s;
-
-      for (int y = 0; y < oh; y++) {
-        for (int x = 0; x < ow; x++) {
-          if (x * 2 + 12 > sw2) continue;
-          if (y * 2 + 12 > sh2) continue;
-
-          final double prob = (outClass[0][y][x][1] as num).toDouble();
-          if (prob > globalMaxProb) globalMaxProb = prob;
-          if (prob > threshold) {
-            final double r0 = (outBbox[0][y][x][0] as num).toDouble();
-            final double r1 = (outBbox[0][y][x][1] as num).toDouble();
-            final double r2 = (outBbox[0][y][x][2] as num).toDouble();
-            final double r3 = (outBbox[0][y][x][3] as num).toDouble();
-
-            final double sxSc = x * 2.0;
-            final double sySc = y * 2.0;
-            const double swSc = 12.0;
-            const double shSc = 12.0;
-
-            final double x1s = sxSc + r0 * swSc;
-            final double y1s = sySc + r1 * shSc;
-            final double x2s = sxSc + (1.0 + r2) * swSc;
-            final double y2s = sySc + (1.0 + r3) * shSc;
-
-            candidates.add(_RawBox(
-              cropX + x1s * invScale,
-              cropY + y1s * invScale,
-              cropX + x2s * invScale,
-              cropY + y2s * invScale,
-              prob,
-            ));
-          }
-        }
-      }
-    }
-
-    final nmsed = _nms(candidates, 0.5);
-    final squared = _resizeToSquare(nmsed);
-
-    sw.stop();
-    debugPrint("P-NET maxProb=${globalMaxProb.toStringAsFixed(4)} candidates=${candidates.length} afterNMS=${nmsed.length} time=${sw.elapsedMilliseconds}ms");
-    return squared;
-  }
-
-  img.Image _cropSquare(img.Image image, _RawBox b, int size) {
-    final double w = b.x2 - b.x1;
-    final double h = b.y2 - b.y1;
-    final double side = max(w, h);
-    final double cx = b.x1 + w / 2;
-    final double cy = b.y1 + h / 2;
-    int x1 = (cx - side / 2).round();
-    int y1 = (cy - side / 2).round();
-    int x2 = (cx + side / 2).round();
-    int y2 = (cy + side / 2).round();
-
-    x1 = x1.clamp(0, image.width - 1);
-    y1 = y1.clamp(0, image.height - 1);
-    x2 = x2.clamp(x1 + 1, image.width);
-    y2 = y2.clamp(y1 + 1, image.height);
-
-    final c = img.copyCrop(image, x: x1, y: y1, width: x2 - x1, height: y2 - y1);
-    return img.copyResize(c, width: size, height: size);
-  }
-
-  List<_RawBox> _runRNet(img.Image image, List<_RawBox> boxes, {double threshold = 0.6}) {
-    final sw = Stopwatch()..start();
-
-    final sorted = List<_RawBox>.from(boxes)..sort((a, b) => b.score.compareTo(a.score));
-    final limited = sorted.take(30).toList();
-
-    final result = <_RawBox>[];
-
-    int idxClass = -1, idxBbox = -1;
-    final outs = _rnet!.getOutputTensors();
-    for (int i = 0; i < outs.length; i++) {
-      final last = outs[i].shape.last;
-      if (last == 2) idxClass = i;
-      else if (last == 4) idxBbox = i;
-    }
-
-    final outClassShape = _rnet!.getOutputTensor(idxClass).shape;
-    final outBboxShape = _rnet!.getOutputTensor(idxBbox).shape;
-
-    double maxProb = 0;
-
-    for (final b in limited) {
-      final crop = _cropSquare(image, b, 24);
-      final input = _imageToInput(crop, 127.5, 127.5);
-
-      final outClass = _zeros(outClassShape);
-      final outBbox = _zeros(outBboxShape);
-      _rnet!.runForMultipleInputs([input], {idxClass: outClass, idxBbox: outBbox});
-
-      final double prob = (outClass[0][1] as num).toDouble();
-      if (prob > maxProb) maxProb = prob;
-
-      if (prob > threshold) {
-        final double w = b.x2 - b.x1 + 1.0;
-        final double h = b.y2 - b.y1 + 1.0;
-        final double r0 = (outBbox[0][0] as num).toDouble();
-        final double r1 = (outBbox[0][1] as num).toDouble();
-        final double r2 = (outBbox[0][2] as num).toDouble();
-        final double r3 = (outBbox[0][3] as num).toDouble();
-        result.add(_RawBox(
-          b.x1 + r0 * w, b.y1 + r1 * h,
-          b.x2 + r2 * w, b.y2 + r3 * h,
-          prob,
-        ));
-      }
-    }
-    final nmsed = _nms(result, 0.7);
-    final squared = _resizeToSquare(nmsed);
-
-    sw.stop();
-    debugPrint("R-NET maxProb=${maxProb.toStringAsFixed(4)} tried=${limited.length} survivors=${nmsed.length} time=${sw.elapsedMilliseconds}ms");
-    return squared;
-  }
-
-  List<_Face> _runONet(img.Image image, List<_RawBox> boxes, {double threshold = 0.5}) {
-    final sw = Stopwatch()..start();
-
-    final sorted = List<_RawBox>.from(boxes)..sort((a, b) => b.score.compareTo(a.score));
-    final limited = sorted.take(5).toList();
-
-    final result = <_Face>[];
-
-    int idxClass = -1, idxBbox = -1, idxLm = -1;
-    final outs = _onet!.getOutputTensors();
-    for (int i = 0; i < outs.length; i++) {
-      final last = outs[i].shape.last;
-      if (last == 2) idxClass = i;
-      else if (last == 4) idxBbox = i;
-      else if (last == 10) idxLm = i;
-    }
-
-    final outClassShape = _onet!.getOutputTensor(idxClass).shape;
-    final outBboxShape = _onet!.getOutputTensor(idxBbox).shape;
-    final outLmShape = _onet!.getOutputTensor(idxLm).shape;
-
-    double maxProb = 0;
-
-    for (final b in limited) {
-      final crop = _cropSquare(image, b, 48);
-      final input = _imageToInput(crop, 127.5, 127.5);
-
-      final outClass = _zeros(outClassShape);
-      final outBbox = _zeros(outBboxShape);
-      final outLm = _zeros(outLmShape);
-      _onet!.runForMultipleInputs([input], {idxClass: outClass, idxBbox: outBbox, idxLm: outLm});
-
-      final double prob = (outClass[0][1] as num).toDouble();
-      if (prob > maxProb) maxProb = prob;
-
-      if (prob > threshold) {
-        final double bw = b.x2 - b.x1 + 1.0;
-        final double bh = b.y2 - b.y1 + 1.0;
-
-        final landmarks = <Point<double>>[];
-        for (int i = 0; i < 5; i++) {
-          final lx = (outLm[0][i] as num).toDouble() * bw + b.x1 - 1.0;
-          final ly = (outLm[0][i + 5] as num).toDouble() * bh + b.y1 - 1.0;
-          landmarks.add(Point(lx, ly));
-        }
-
-        final double r0 = (outBbox[0][0] as num).toDouble();
-        final double r1 = (outBbox[0][1] as num).toDouble();
-        final double r2 = (outBbox[0][2] as num).toDouble();
-        final double r3 = (outBbox[0][3] as num).toDouble();
-        final double nx1 = b.x1 + r0 * bw;
-        final double ny1 = b.y1 + r1 * bh;
-        final double nx2 = b.x2 + r2 * bw;
-        final double ny2 = b.y2 + r3 * bh;
-
-        result.add(_Face(
-          box: Rect.fromLTRB(nx1, ny1, nx2, ny2),
-          landmarks: landmarks,
-          score: prob,
-        ));
-      }
-    }
-
-    sw.stop();
-    debugPrint("O-NET maxProb=${maxProb.toStringAsFixed(4)} tried=${limited.length} survivors=${result.length} time=${sw.elapsedMilliseconds}ms");
-    return result;
-  }
-
-  List<_Face> _detect(img.Image image) {
-    final sw = Stopwatch()..start();
-
-    final p = _runPNet(image);
-    final tP = sw.elapsedMilliseconds;
-    if (p.isEmpty) {
-      _meta = "P-Net: 0. Time: ${sw.elapsedMilliseconds}ms";
-      return [];
-    }
-    final r = _runRNet(image, p);
-    final tR = sw.elapsedMilliseconds - tP;
-    if (r.isEmpty) {
-      _meta = "P-Net:${p.length}(${tP}ms) R-Net:0(${tR}ms) Total:${sw.elapsedMilliseconds}ms";
-      return [];
-    }
-    final o = _runONet(image, r);
-    final tO = sw.elapsedMilliseconds - tP - tR;
-    sw.stop();
-
-    _meta = "P-Net:${p.length}(${tP}ms) R-Net:${r.length}(${tR}ms) O-Net:${o.length}(${tO}ms) Total:${sw.elapsedMilliseconds}ms";
-    return o;
-  }
-
-  Future<void> _capture() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
-    setState(() {
-      _busy = true;
-      _status = "Mengambil foto...";
-      _resultPng = null;
+      _running = true;
+      _progress = 'Memuat model...';
+      _result = null;
     });
 
     try {
-      final xfile = await _controller!.takePicture();
-      final bytes = await xfile.readAsBytes();
-      var raw = img.decodeImage(bytes);
-      if (raw == null) {
+      await MTCNNService().init();
+      if (!MobileFaceNetService().isModelLoaded) {
+        await MobileFaceNetService().init();
+      }
+
+      final photos = <img.Image>[];
+      for (final a in _positives) {
+        try {
+          final data = await rootBundle.load(a);
+          final decoded = img.decodeImage(data.buffer.asUint8List());
+          if (decoded != null) photos.add(decoded);
+        } catch (_) {}
+      }
+
+      if (photos.isEmpty) {
         setState(() {
-          _busy = false;
-          _status = "Gagal decode.";
+          _running = false;
+          _progress = '';
+          _result = 'Tidak ada foto valid di assets/benchmark/';
         });
         return;
       }
 
-      if (raw.width > 960) raw = img.copyResize(raw, width: 960);
+      final allMtcnn = <int>[];
+      final allMfn = <int>[];
+      final allTotal = <int>[];
+      int detectSuccess = 0;
+      int detectTotal = 0;
+      final perPhotoResults = <Map<String, dynamic>>[];
 
-      setState(() => _status = "Menjalankan MTCNN...");
-      final sw = Stopwatch()..start();
-      final faces = _detect(raw);
-      sw.stop();
+      for (int i = 0; i < photos.length; i++) {
+        setState(() => _progress = 'Foto ${i + 1}/${photos.length} — warmup...');
 
-      final vis = img.Image.from(raw);
-      for (final f in faces) {
-        final x1 = f.box.left.toInt().clamp(0, vis.width - 1);
-        final y1 = f.box.top.toInt().clamp(0, vis.height - 1);
-        final x2 = f.box.right.toInt().clamp(0, vis.width - 1);
-        final y2 = f.box.bottom.toInt().clamp(0, vis.height - 1);
-        for (int x = x1; x <= x2; x++) {
-          vis.setPixelRgb(x, y1, 255, 0, 0);
-          vis.setPixelRgb(x, y2, 255, 0, 0);
+        final photo = photos[i];
+
+        for (int w = 0; w < 3; w++) {
+          await _processOne(photo);
         }
-        for (int y = y1; y <= y2; y++) {
-          vis.setPixelRgb(x1, y, 255, 0, 0);
-          vis.setPixelRgb(x2, y, 255, 0, 0);
-        }
-        for (final lm in f.landmarks) {
-          final lx = lm.x.toInt().clamp(0, vis.width - 1);
-          final ly = lm.y.toInt().clamp(0, vis.height - 1);
-          for (int dx = -4; dx <= 4; dx++) {
-            for (int dy = -4; dy <= 4; dy++) {
-              final px = (lx + dx).clamp(0, vis.width - 1);
-              final py = (ly + dy).clamp(0, vis.height - 1);
-              vis.setPixelRgb(px, py, 0, 255, 0);
-            }
+
+        final photoMtcnn = <int>[];
+        final photoMfn = <int>[];
+        final photoTotal = <int>[];
+
+        for (int it = 0; it < perPhoto; it++) {
+          setState(() => _progress =
+              'Foto ${i + 1}/${photos.length} — iterasi ${it + 1}/$perPhoto');
+
+          final t0 = DateTime.now();
+          final r = await _processOne(photo);
+          final t1 = DateTime.now();
+          final total = t1.difference(t0).inMilliseconds;
+
+          detectTotal++;
+          if (r.mtcnnMs != null && r.mfnMs != null) {
+            detectSuccess++;
+            photoMtcnn.add(r.mtcnnMs!);
+            photoMfn.add(r.mfnMs!);
+            photoTotal.add(total);
+            allMtcnn.add(r.mtcnnMs!);
+            allMfn.add(r.mfnMs!);
+            allTotal.add(total);
           }
         }
+
+        perPhotoResults.add({
+          'photo': i + 1,
+          'mtcnn_avg': _avg(photoMtcnn),
+          'mfn_avg': _avg(photoMfn),
+          'total_avg': _avg(photoTotal),
+          'success': photoTotal.length,
+          'iterations': perPhoto,
+        });
       }
 
-      final png = Uint8List.fromList(img.encodeJpg(vis, quality: 85));
+      final stats = <String, dynamic>{
+        'photos': photos.length,
+        'per_photo_iterations': perPhoto,
+        'warmup_per_photo': 3,
+        'mtcnn': _statBlock(allMtcnn),
+        'mfn': _statBlock(allMfn),
+        'total': _statBlock(allTotal),
+        'detect_success': detectSuccess,
+        'detect_total': detectTotal,
+        'per_photo': perPhotoResults,
+      };
+
+      setState(() => _progress = 'Upload ke Supabase...');
+      final uploaded = await _uploadResult('face_speed', stats);
 
       setState(() {
-        _resultPng = png;
-        _busy = false;
-        final metaInfo = "TOTAL: ${sw.elapsedMilliseconds} ms | Deteksi: ${faces.length}";
-        _meta = "$metaInfo\n$_meta";
-        _status = "Selesai.";
+        _running = false;
+        _progress = '';
+        _result = _formatFaceResult(stats, uploaded);
       });
     } catch (e) {
       setState(() {
-        _busy = false;
-        _status = "Error: $e";
+        _running = false;
+        _progress = '';
+        _result = 'Error: $e';
       });
     }
   }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _disposeCamera();
-    super.dispose();
+  Future<_FaceProcessResult> _processOne(img.Image src) async {
+    final resized = src.width > 640 ? img.copyResize(src, width: 640) : src;
+
+    final tMtc = DateTime.now();
+    final faces = await MTCNNService().detectFaces(resized, isGlassesMode: true);
+    final mtcnnMs = DateTime.now().difference(tMtc).inMilliseconds;
+
+    if (faces.isEmpty) return _FaceProcessResult(null, null);
+
+    final bestFace = faces.reduce((a, b) => a.score > b.score ? a : b);
+    final aligned = MTCNNService().alignAndCropFace(resized, bestFace);
+
+    final tMfn = DateTime.now();
+    MobileFaceNetService().predict(aligned);
+    final mfnMs = DateTime.now().difference(tMfn).inMilliseconds;
+
+    return _FaceProcessResult(mtcnnMs, mfnMs);
   }
 
+  // ============================================================
+  // FACE ACCURACY BENCHMARK
+  // ============================================================
+  Future<void> _runAccuracyBenchmark() async {
+    setState(() {
+      _running = true;
+      _progress = 'Menyiapkan model...';
+      _result = null;
+    });
+
+    try {
+      await MTCNNService().init();
+      if (!MobileFaceNetService().isModelLoaded) {
+        await MobileFaceNetService().init();
+      }
+
+      // Load positif
+      final posImgs = <img.Image>[];
+      for (final a in _positives) {
+        try {
+          final data = await rootBundle.load(a);
+          final decoded = img.decodeImage(data.buffer.asUint8List());
+          if (decoded != null) posImgs.add(decoded);
+        } catch (_) {}
+      }
+      if (posImgs.isEmpty) {
+        setState(() {
+          _running = false;
+          _progress = '';
+          _result = 'Tidak ada foto positif.';
+        });
+        return;
+      }
+
+      // Load negatif
+      final negImgs = <img.Image>[];
+      for (final a in _negatives) {
+        try {
+          final data = await rootBundle.load(a);
+          final decoded = img.decodeImage(data.buffer.asUint8List());
+          if (decoded != null) negImgs.add(decoded);
+        } catch (_) {}
+      }
+
+      // Ambil embedding registrasi user dari DB
+      final user = await DatabaseService.instance.getUser();
+      if (user == null) {
+        setState(() {
+          _running = false;
+          _progress = '';
+          _result = 'User tidak ditemukan.';
+        });
+        return;
+      }
+      final userId = user['user_id'] as String;
+
+      final rows = await DatabaseService.instance.getEmbeddings(
+        userId: userId,
+        mode: 'non_glasses',
+      );
+      if (rows.isEmpty) {
+        setState(() {
+          _running = false;
+          _progress = '';
+          _result = 'Tidak ada embedding registrasi.';
+        });
+        return;
+      }
+
+      final refEmb = <List<double>>[];
+      for (final row in rows) {
+        final raw = row['embedding'] as String;
+        final parsed = (raw.startsWith('['))
+            ? (raw.substring(1, raw.length - 1).split(','))
+            : [];
+        final emb = parsed
+            .map((s) => double.tryParse(s.trim()) ?? 0.0)
+            .toList();
+        if (emb.length == 128) refEmb.add(emb);
+      }
+      if (refEmb.isEmpty) {
+        setState(() {
+          _running = false;
+          _progress = '';
+          _result = 'Embedding registrasi kosong/tidak valid.';
+        });
+        return;
+      }
+
+      // Hitung distance tiap foto ke embedding registrasi (ambil min)
+      setState(() => _progress = 'Menghitung distance positif...');
+      final posDist = <double>[];
+      for (int i = 0; i < posImgs.length; i++) {
+        setState(() => _progress = 'Positif ${i + 1}/${posImgs.length}');
+        final d = await _minDistance(posImgs[i], refEmb);
+        if (d != null) posDist.add(d);
+      }
+
+      setState(() => _progress = 'Menghitung distance negatif...');
+      final negDist = <double>[];
+      for (int i = 0; i < negImgs.length; i++) {
+        setState(() => _progress = 'Negatif ${i + 1}/${negImgs.length}');
+        final d = await _minDistance(negImgs[i], refEmb);
+        if (d != null) negDist.add(d);
+      }
+
+      // Sweep threshold
+      const thresholds = [0.60, 0.65, 0.70, 0.75, 0.80, 0.85];
+      final sweep = <Map<String, dynamic>>[];
+
+      for (final t in thresholds) {
+        int tp = 0, fn = 0, tn = 0, fp = 0;
+        for (final d in posDist) {
+          if (d <= t) {
+            tp++;
+          } else {
+            fn++;
+          }
+        }
+        for (final d in negDist) {
+          if (d <= t) {
+            fp++;
+          } else {
+            tn++;
+          }
+        }
+        final total = tp + fn + tn + fp;
+        final acc = total == 0 ? 0.0 : (tp + tn) / total * 100;
+        final far = (fp + tn) == 0 ? 0.0 : fp / (fp + tn) * 100;
+        final frr = (fn + tp) == 0 ? 0.0 : fn / (fn + tp) * 100;
+        sweep.add({
+          'threshold': t,
+          'tp': tp,
+          'fn': fn,
+          'tn': tn,
+          'fp': fp,
+          'accuracy': acc,
+          'far': far,
+          'frr': frr,
+        });
+      }
+
+      // Cari threshold terbaik (akurasi tertinggi, tie-break FAR terendah)
+      sweep.sort((a, b) {
+        final accCmp =
+            (b['accuracy'] as double).compareTo(a['accuracy'] as double);
+        if (accCmp != 0) return accCmp;
+        return (a['far'] as double).compareTo(b['far'] as double);
+      });
+      final best = sweep.first;
+
+      final stats = <String, dynamic>{
+        'positives': posDist.length,
+        'negatives': negDist.length,
+        'ref_embeddings': refEmb.length,
+        'pos_distances': posDist,
+        'neg_distances': negDist,
+        'sweep': sweep,
+        'best': best,
+      };
+
+      setState(() => _progress = 'Upload ke Supabase...');
+      final uploaded = await _uploadResult('face_accuracy', stats);
+
+      setState(() {
+        _running = false;
+        _progress = '';
+        _result = _formatAccuracyResult(stats, uploaded);
+      });
+    } catch (e) {
+      setState(() {
+        _running = false;
+        _progress = '';
+        _result = 'Error: $e';
+      });
+    }
+  }
+
+  Future<double?> _minDistance(
+    img.Image src,
+    List<List<double>> refs,
+  ) async {
+    final resized = src.width > 640 ? img.copyResize(src, width: 640) : src;
+    final faces = await MTCNNService().detectFaces(resized, isGlassesMode: true);
+    if (faces.isEmpty) return null;
+
+    final bestFace = faces.reduce((a, b) => a.score > b.score ? a : b);
+    final aligned = MTCNNService().alignAndCropFace(resized, bestFace);
+    final emb = MobileFaceNetService().predict(aligned);
+    if (emb == null) return null;
+
+    double minD = double.infinity;
+    for (final ref in refs) {
+      double sum = 0.0;
+      final n = emb.length < ref.length ? emb.length : ref.length;
+      for (int i = 0; i < n; i++) {
+        final diff = emb[i] - ref[i];
+        sum += diff * diff;
+      }
+      final d = sum;
+      final dist = d == 0 ? 0.0 : _sqrt(d);
+      if (dist < minD) minD = dist;
+    }
+    return minD;
+  }
+
+  double _sqrt(double x) {
+    if (x <= 0) return 0;
+    double r = x;
+    for (int i = 0; i < 20; i++) {
+      r = 0.5 * (r + x / r);
+    }
+    return r;
+  }
+
+  // ============================================================
+  // GPS BENCHMARK
+  // ============================================================
+  Future<void> _runGpsBenchmark(bool useSatellite) async {
+    final label = useSatellite ? 'SAT' : 'FUSED';
+
+    setState(() {
+      _running = true;
+      _progress = 'GPS $label — menyiapkan...';
+      _result = null;
+    });
+
+    try {
+      final gps = GpsService();
+      final ready = await gps.isGpsReady();
+      if (!ready) {
+        setState(() {
+          _running = false;
+          _progress = '';
+          _result = 'GPS tidak siap / permission ditolak.';
+        });
+        return;
+      }
+
+      final t0 = DateTime.now();
+      final fix = await gps.getPositionStreamCalibrate(
+        timeout: const Duration(seconds: 60),
+        useSatellite: useSatellite,
+        onProgress: (elapsed, total) {
+          setState(() => _progress = 'GPS $label — ${elapsed}s/$total');
+        },
+      );
+      final durationMs = DateTime.now().difference(t0).inMilliseconds;
+
+      final result = <String, dynamic>{
+        'mode': useSatellite ? 'sat' : 'fused',
+        'duration_ms': durationMs,
+        'success': fix != null && fix.isValid,
+        'lat': fix?.lat,
+        'lng': fix?.lng,
+        'accuracy_meters': fix?.accuracyMeters,
+      };
+
+      setState(() => _progress = 'Upload GPS $label...');
+      final uploaded = await _uploadResult(
+        useSatellite ? 'gps_sat' : 'gps_fused',
+        result,
+      );
+
+      setState(() {
+        _running = false;
+        _progress = '';
+        final acc = fix?.accuracyMeters.toStringAsFixed(1) ?? '-';
+        final ok = result['success'] == true ? 'sukses' : 'gagal';
+        _result = 'GPS $label: $ok\n'
+            'Durasi: ${durationMs}ms\n'
+            'Accuracy: ${acc}m\n'
+            'Upload: ${uploaded ? "OK" : "GAGAL"}';
+      });
+    } catch (e) {
+      setState(() {
+        _running = false;
+        _progress = '';
+        _result = 'GPS Error: $e';
+      });
+    }
+  }
+
+  // ============================================================
+  // UPLOAD
+  // ============================================================
+  Future<bool> _uploadResult(String testType, Map<String, dynamic> data) async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return false;
+
+    try {
+      await Supabase.instance.client.from('benchmark_runs').insert({
+        'user_id': user.id,
+        'device_id': gDeviceId.isEmpty ? null : gDeviceId,
+        'test_type': testType,
+        'result_json': data,
+      });
+      debugPrint("BENCHMARK: uploaded $testType");
+      return true;
+    } catch (e) {
+      debugPrint("BENCHMARK upload error: $e");
+      return false;
+    }
+  }
+
+  // ============================================================
+  // HELPER
+  // ============================================================
+  Map<String, dynamic> _statBlock(List<int> xs) {
+    if (xs.isEmpty) {
+      return {'min': 0, 'max': 0, 'avg': 0.0, 'median': 0, 'count': 0};
+    }
+    return {
+      'min': xs.reduce((a, b) => a < b ? a : b),
+      'max': xs.reduce((a, b) => a > b ? a : b),
+      'avg': _avg(xs),
+      'median': _median(xs),
+      'count': xs.length,
+    };
+  }
+
+  double _avg(List<int> xs) {
+    if (xs.isEmpty) return 0;
+    return xs.reduce((a, b) => a + b) / xs.length;
+  }
+
+  int _median(List<int> xs) {
+    if (xs.isEmpty) return 0;
+    final sorted = List<int>.from(xs)..sort();
+    final mid = sorted.length ~/ 2;
+    if (sorted.length.isOdd) return sorted[mid];
+    return ((sorted[mid - 1] + sorted[mid]) / 2).round();
+  }
+
+  String _formatFaceResult(Map<String, dynamic> stats, bool uploaded) {
+    final m = stats['mtcnn'] as Map<String, dynamic>;
+    final f = stats['mfn'] as Map<String, dynamic>;
+    final t = stats['total'] as Map<String, dynamic>;
+
+    return 'FACE SPEED BENCHMARK\n'
+        'Foto: ${stats['photos']} × ${stats['per_photo_iterations']} iterasi\n'
+        'Deteksi: ${stats['detect_success']}/${stats['detect_total']}\n\n'
+        'MTCNN (ms): min=${m['min']} max=${m['max']} '
+        'avg=${(m['avg'] as double).toStringAsFixed(1)} median=${m['median']}\n'
+        'MFN (ms): min=${f['min']} max=${f['max']} '
+        'avg=${(f['avg'] as double).toStringAsFixed(1)} median=${f['median']}\n'
+        'Total (ms): min=${t['min']} max=${t['max']} '
+        'avg=${(t['avg'] as double).toStringAsFixed(1)} median=${t['median']}\n\n'
+        'Upload: ${uploaded ? "OK" : "GAGAL"}';
+  }
+
+  String _formatAccuracyResult(Map<String, dynamic> stats, bool uploaded) {
+    final sb = StringBuffer();
+    sb.writeln('FACE ACCURACY BENCHMARK');
+    sb.writeln('Positif: ${stats['positives']} foto');
+    sb.writeln('Negatif: ${stats['negatives']} foto');
+    sb.writeln('Ref embeddings: ${stats['ref_embeddings']}');
+    sb.writeln();
+    sb.writeln('Sweep threshold:');
+    for (final s in stats['sweep'] as List) {
+      final m = s as Map<String, dynamic>;
+      sb.writeln(
+          '  t=${(m['threshold'] as double).toStringAsFixed(2)} '
+          'acc=${(m['accuracy'] as double).toStringAsFixed(1)}% '
+          'FAR=${(m['far'] as double).toStringAsFixed(1)}% '
+          'FRR=${(m['frr'] as double).toStringAsFixed(1)}% '
+          '[TP=${m['tp']} FN=${m['fn']} TN=${m['tn']} FP=${m['fp']}]');
+    }
+    final best = stats['best'] as Map<String, dynamic>;
+    sb.writeln();
+    sb.writeln('TERBAIK: t=${(best['threshold'] as double).toStringAsFixed(2)} '
+        'acc=${(best['accuracy'] as double).toStringAsFixed(1)}%');
+    sb.writeln();
+    sb.writeln('Upload: ${uploaded ? "OK" : "GAGAL"}');
+    return sb.toString();
+  }
+
+  // ============================================================
+  // BUILD
+  // ============================================================
   @override
   Widget build(BuildContext context) {
+    final gutter = AppSpacing.horizontal(context);
+
     return Scaffold(
-      appBar: AppBar(title: const Text("Testing MTCNN")),
-      body: ListView(
-        padding: const EdgeInsets.all(12),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Colors.blue.shade50,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.blue.shade200),
+      backgroundColor: AppColors.cream,
+      appBar: AppBar(
+        title: const Text('Testing & Benchmark'),
+        backgroundColor: Colors.transparent,
+        foregroundColor: AppColors.darkSlate,
+        elevation: 0,
+      ),
+      body: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(gutter, 16, gutter, 40),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Text(
+                  'Iterasi per foto:',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.darkSlate,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                DropdownButton<int>(
+                  value: _perPhoto,
+                  underline: const SizedBox.shrink(),
+                  items: const [
+                    DropdownMenuItem(value: 10, child: Text('Cepat (10)')),
+                    DropdownMenuItem(value: 30, child: Text('Lama (30)')),
+                  ],
+                  onChanged: _running
+                      ? null
+                      : (v) => setState(() => _perPhoto = v ?? 10),
+                ),
+              ],
             ),
-            child: Text(_status, style: const TextStyle(fontWeight: FontWeight.bold)),
-          ),
-          const SizedBox(height: 10),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text("Status load model", style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 6),
-                  SelectableText(_modelInfo, style: const TextStyle(fontFamily: "monospace", fontSize: 11)),
-                ],
+            const SizedBox(height: 20),
+            SizedBox(
+              height: 52,
+              child: ElevatedButton.icon(
+                onPressed: _running ? null : () => _runFaceBenchmark(_perPhoto),
+                icon: const Icon(Icons.speed),
+                label: const Text(
+                  'Benchmark Kecepatan Wajah',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 10),
-          if (_controller != null && _controller!.value.isInitialized)
-            AspectRatio(
-              aspectRatio: _controller!.value.aspectRatio,
-              child: CameraPreview(_controller!),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 52,
+              child: ElevatedButton.icon(
+                onPressed: _running ? null : _runAccuracyBenchmark,
+                icon: const Icon(Icons.analytics),
+                label: const Text(
+                  'Benchmark Akurasi Wajah',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+              ),
             ),
-          const SizedBox(height: 12),
-          ElevatedButton.icon(
-            onPressed: _busy ? null : _capture,
-            icon: const Icon(Icons.camera_alt),
-            label: Text(_busy ? "Memproses..." : "Ambil Foto & Deteksi"),
-          ),
-          const SizedBox(height: 16),
-          if (_meta.isNotEmpty)
-            Text(_meta, style: const TextStyle(fontWeight: FontWeight.bold)),
-          if (_resultPng != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Image.memory(_resultPng!, fit: BoxFit.contain),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 52,
+              child: ElevatedButton.icon(
+                onPressed: _running ? null : () => _runGpsBenchmark(false),
+                icon: const Icon(Icons.location_on),
+                label: const Text(
+                  'Benchmark GPS — FUSED',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+              ),
             ),
-        ],
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 52,
+              child: ElevatedButton.icon(
+                onPressed: _running ? null : () => _runGpsBenchmark(true),
+                icon: const Icon(Icons.satellite_alt),
+                label: const Text(
+                  'Benchmark GPS — SAT',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+            const SizedBox(height: 28),
+            if (_progress.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: AppColors.creamDark,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: AppColors.tealMedium,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        _progress,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: AppColors.darkSlate,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            if (_result != null) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: AppColors.creamDark,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: SelectableText(
+                  _result!,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.darkSlate,
+                    height: 1.5,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

@@ -80,6 +80,10 @@ flutter:
       - assets/models/pnet.tflite
       - assets/models/rnet.tflite
       - assets/models/onet.tflite
+      - assets/benchmark/sample1.jpg
+      - assets/benchmark/sample2.jpg
+      - assets/benchmark/sample3.jpg
+      - assets/benchmark/neg1.jpg
 
   fonts:
     - family: Quicksand

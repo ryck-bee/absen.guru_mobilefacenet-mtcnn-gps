@@ -21,6 +21,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   bool _loading = false;
   bool _error = false;
+  bool _obscurePw = true;
   String? _errorMessage;
 
   _PermStatus _permStatus = _PermStatus.checking;
@@ -178,13 +179,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           error: _error,
                         ),
                         const SizedBox(height: 28),
-                        _buildField(
-                          controller: _pwController,
-                          label: 'Password',
-                          obscure: true,
-                          error: _error,
-                          onSubmitted: (_) => _login(),
-                        ),
+                        _buildPasswordField(),
                         const SizedBox(height: 40),
                         _buildPermissionState(),
                       ],
@@ -195,6 +190,52 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildPasswordField() {
+    final lineColor = _error ? AppColors.error : AppColors.darkSlate;
+
+    return TextField(
+      controller: _pwController,
+      obscureText: _obscurePw,
+      enabled: !_loading,
+      onSubmitted: (_) => _login(),
+      style: const TextStyle(
+        color: AppColors.darkSlate,
+        fontSize: 16,
+      ),
+      decoration: InputDecoration(
+        labelText: 'Password',
+        labelStyle: TextStyle(
+          color: lineColor,
+          fontSize: 14,
+        ),
+        floatingLabelStyle: TextStyle(
+          color: lineColor,
+          fontWeight: FontWeight.w600,
+        ),
+        suffixIcon: IconButton(
+          icon: Icon(
+            _obscurePw ? Icons.visibility_off : Icons.visibility,
+            color: AppColors.hurufSecondary,
+            size: 22,
+          ),
+          onPressed: () => setState(() => _obscurePw = !_obscurePw),
+        ),
+        enabledBorder: UnderlineInputBorder(
+          borderSide: BorderSide(color: lineColor, width: 1.5),
+        ),
+        focusedBorder: UnderlineInputBorder(
+          borderSide: BorderSide(color: lineColor, width: 2),
+        ),
+        disabledBorder: UnderlineInputBorder(
+          borderSide: BorderSide(
+            color: lineColor.withOpacity(0.4),
+            width: 1.5,
+          ),
+        ),
       ),
     );
   }

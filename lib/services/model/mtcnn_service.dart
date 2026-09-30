@@ -210,7 +210,8 @@ class MTCNNService {
     final int oh = outClassShape[1];
     final int ow = outClassShape[2];
 
-    final scales = [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125];
+    //scale sementara work midrange 4 scale, jika hp low end jalan maka kita fix
+    final scales = [1.0, 0.5, 0.25, 0.125];
 
     final candidates = <_RawBox>[];
 

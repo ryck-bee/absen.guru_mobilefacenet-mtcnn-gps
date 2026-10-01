@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_spacing.dart';
 import '../../services/db/database_service.dart';
@@ -10,6 +11,7 @@ import '../../services/gps/gps_service.dart';
 import '../../services/model/mobilefacenet_service.dart';
 import '../../services/model/mtcnn_service.dart';
 import '../../main.dart';
+import '../../services/debug_logger.dart';
 
 class TestScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -550,6 +552,68 @@ class _TestScreenState extends State<TestScreen> {
     return sb.toString();
   }
 
+    Future<void> _shareLogJson() async {
+    try {
+      final file = await DebugLogger.instance.exportJson();
+      if (file == null) {
+        _showSnack("Gagal export log JSON.");
+        return;
+      }
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'application/json')],
+          subject: 'Absensi Log (JSON)',
+          text: 'Log ${DateTime.now().toIso8601String()}',
+        ),
+      );
+    } catch (e) {
+      _showSnack("Error: $e");
+    }
+  }
+
+  Future<void> _shareLogText() async {
+    try {
+      final file = await DebugLogger.instance.exportText();
+      if (file == null) {
+        _showSnack("Gagal export log TXT.");
+        return;
+      }
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'text/plain')],
+          subject: 'Absensi Log (TXT)',
+          text: 'Log ${DateTime.now().toIso8601String()}',
+        ),
+      );
+    } catch (e) {
+      _showSnack("Error: $e");
+    }
+  }
+
+  Future<void> _shareLearningLog() async {
+    try {
+      final file = await DebugLogger.instance.getLearningFile();
+      if (file == null || !await file.exists()) {
+        _showSnack("Belum ada learning log.");
+        return;
+      }
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'text/plain')],
+          subject: 'Learning Log',
+          text: 'Learning log ${DateTime.now().toIso8601String()}',
+        ),
+      );
+    } catch (e) {
+      _showSnack("Error: $e");
+    }
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
   // ============================================================
   // BUILD
   // ============================================================
@@ -643,6 +707,41 @@ class _TestScreenState extends State<TestScreen> {
               ),
             ),
             const SizedBox(height: 28),
+            const Text(
+              'Export Log',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: AppColors.darkSlate,
+              ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 48,
+              child: OutlinedButton.icon(
+                onPressed: _running ? null : _shareLogJson,
+                icon: const Icon(Icons.data_object, size: 18),
+                label: const Text('Share Log JSON'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 48,
+              child: OutlinedButton.icon(
+                onPressed: _running ? null : _shareLogText,
+                icon: const Icon(Icons.description, size: 18),
+                label: const Text('Share Log TXT'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 48,
+              child: OutlinedButton.icon(
+                onPressed: _running ? null : _shareLearningLog,
+                icon: const Icon(Icons.school, size: 18),
+                label: const Text('Share Learning Log'),
+              ),
+            ),
             if (_progress.isNotEmpty)
               Container(
                 padding: const EdgeInsets.all(14),

@@ -12,7 +12,7 @@ class DatabaseService {
   static final DatabaseService instance = DatabaseService._();
 
   Database? _db;
-  static const int _dbVersion = 9;
+  static const int _dbVersion = 10;
   static const String _dbName = 'absensi_wajah.db';
   static const _uuid = Uuid();
 
@@ -139,6 +139,7 @@ class DatabaseService {
         photo_url TEXT,
         sync_status TEXT NOT NULL DEFAULT 'pending',
         synced_at TEXT
+        time_status TEXT,
       )
     ''');
 
@@ -340,6 +341,10 @@ class DatabaseService {
         )
       ''');
     }
+
+    if (oldVersion < 10) {
+      await db.execute('ALTER TABLE session_logs_local ADD COLUMN time_status TEXT');
+    }
   }
 
   // ============================================================
@@ -517,7 +522,9 @@ class DatabaseService {
 
   Future<int> countPendingEmbeddings() async {
     final db = await database;
-    final r = await db.rawQuery("SELECT COUNT(*) as c FROM embeddings_local WHERE sync_status = 'pending'");
+    final r = await db.rawQuery(
+      "SELECT COUNT(*) as c FROM embeddings_local WHERE sync_status = 'pending' AND source != 'learning'"
+    );
     return Sqflite.firstIntValue(r) ?? 0;
   }
 
@@ -577,6 +584,7 @@ class DatabaseService {
     int? deviceUptimeMs,
     int? deviceBootTimeMs,
     int? luxValue,
+    String? timeStatus,
   }) async {
     final db = await database;
     return await db.insert('session_logs_local', {
@@ -605,6 +613,7 @@ class DatabaseService {
       'device_boot_time_ms': deviceBootTimeMs,
       'lux_value': luxValue,
       'sync_status': 'pending',
+      'time_status': timeStatus,
     });
   }
 
@@ -820,9 +829,10 @@ class DatabaseService {
       'gps_attempts_local',
     ];
     for (final t in tables) {
-      final r = await db.rawQuery(
-        "SELECT COUNT(*) as c FROM $t WHERE sync_status = 'pending'",
-      );
+      final where = t == 'embeddings_local'
+          ? "sync_status = 'pending' AND source != 'learning'"
+          : "sync_status = 'pending'";
+      final r = await db.rawQuery("SELECT COUNT(*) as c FROM $t WHERE $where");
       final count = Sqflite.firstIntValue(r) ?? 0;
       if (count > 0) return true;
     }

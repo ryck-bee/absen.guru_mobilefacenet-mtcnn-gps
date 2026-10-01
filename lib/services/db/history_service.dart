@@ -1,4 +1,3 @@
-import 'package:sqflite/sqflite.dart';
 import '../model/history_entry.dart';
 import 'database_service.dart';
 

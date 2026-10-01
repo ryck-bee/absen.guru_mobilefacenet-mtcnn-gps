@@ -353,6 +353,7 @@ class SyncService {
         'device_boot_time_ms': row['device_boot_time_ms'],
         'lux_value': row['lux_value'],
         'device_id': _deviceIdOrNull,
+        'time_status': row['time_status'],
       });
       return true;
     } on PostgrestException catch (e) {

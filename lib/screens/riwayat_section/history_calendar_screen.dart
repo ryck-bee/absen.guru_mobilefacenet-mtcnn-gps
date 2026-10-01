@@ -149,7 +149,7 @@ class _HistoryCalendarViewState extends State<HistoryCalendarView> {
               style: TextStyle(
                 fontSize: fontSize,
                 fontWeight: FontWeight.w600,
-                color: AppColors.darkSlate.withOpacity(0.6),
+                color: AppColors.darkSlate.withValues(alpha: 0.6),
               ),
             ),
           ),

@@ -46,6 +46,29 @@ class MTCNNService {
     }
   }
 
+    /// Init dari bytes — untuk worker isolate.
+  /// Bytes dikirim dari main isolate saat startup.
+  Future<void> initFromBytes({
+    required Uint8List pnetBytes,
+    required Uint8List rnetBytes,
+    required Uint8List onetBytes,
+  }) async {
+    if (_isLoaded) return;
+    try {
+      final options = InterpreterOptions()..threads = 4;
+      _pnet = Interpreter.fromBuffer(pnetBytes, options: options);
+      _rnet = Interpreter.fromBuffer(rnetBytes, options: options);
+      _onet = Interpreter.fromBuffer(onetBytes, options: options);
+      _pnet!.allocateTensors();
+      _rnet!.allocateTensors();
+      _onet!.allocateTensors();
+      _isLoaded = true;
+      debugPrint("MTCNN: model loaded (bytes)");
+    } catch (e) {
+      debugPrint("MTCNN: gagal load dari bytes -> $e");
+    }
+  }
+
   bool detectGlasses(img.Image inputImage, MTCNNFace face) {
     if (face.landmarks.length < 2) return false;
 

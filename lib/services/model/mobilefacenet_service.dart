@@ -129,6 +129,22 @@ class MobileFaceNetService {
     }
   }
 
+    /// Init dari bytes — untuk worker isolate.
+  Future<void> initFromBytes(Uint8List modelBytes) async {
+    if (_isModelLoaded && _interpreter != null) return;
+    try {
+      final options = InterpreterOptions()..threads = 4;
+      _interpreter = Interpreter.fromBuffer(modelBytes, options: options);
+      _isModelLoaded = true;
+      debugPrint("MFN: model loaded (bytes)");
+    } catch (e, stackTrace) {
+      _isModelLoaded = false;
+      _interpreter = null;
+      debugPrint("MFN: gagal load dari bytes -> $e");
+      debugPrint(stackTrace.toString());
+    }
+  }
+
   List<double>? predictEmbedding(img.Image faceImage) {
     if (_interpreter == null) {
       debugPrint("DEBUG_MOBILEFACENET_ERROR: Interpreter belum diinisialisasi!");
@@ -590,4 +606,13 @@ class MobileFaceNetService {
   int sampleCountFor(String userId) => _registeredUsers[userId]?.totalSamples ?? 0;
   int nonGlassesCountFor(String userId) => _registeredUsers[userId]?.nonGlasses.length ?? 0;
   int glassesCountFor(String userId) => _registeredUsers[userId]?.glasses.length ?? 0;
+
+  /// Hitung HANYA registrasi (source='registration'), bukan learning.
+  int registrationCountFor(String userId) {
+    final data = _registeredUsers[userId];
+    if (data == null) return 0;
+    final regNon = data.nonGlasses.where((e) => e.source == 'registration').length;
+    final regGls = data.glasses.where((e) => e.source == 'registration').length;
+    return regNon + regGls;
+  }
 }

@@ -6,7 +6,6 @@ import '../../services/db/database_service.dart';
 import '../../services/db/supabase_service.dart';
 import '../../services/model/mobilefacenet_service.dart';
 import '../../widgets/loading_overlay.dart';
-import 'test_screen.dart';
 import '../face_section/face_entry_screen.dart';
 
 class ProfilScreen extends StatefulWidget {
@@ -41,8 +40,7 @@ class _ProfilScreenState extends State<ProfilScreen> {
 
       final userId = user['user_id'] as String;
       final svc = MobileFaceNetService();
-      final terdaftar =
-          svc.nonGlassesCountFor(userId) + svc.glassesCountFor(userId);
+      final terdaftar = svc.registrationCountFor(userId);
       final dipelajari =
           await DatabaseService.instance.countLearningEmbeddings(userId);
       final anchor = await DatabaseService.instance.getAnchor();
@@ -56,7 +54,9 @@ class _ProfilScreenState extends State<ProfilScreen> {
         final dt = DateTime.tryParse(anchor['updated_at'] as String);
         if (dt != null) {
           final diff = DateTime.now().difference(dt);
-          if (diff.inMinutes < 60) {
+          if (diff.isNegative || diff.inMinutes < 1) {
+            lastSync = 'baru saja';
+          } else if (diff.inMinutes < 60) {
             lastSync = '${diff.inMinutes} menit lalu';
           } else if (diff.inHours < 24) {
             lastSync = '${diff.inHours} jam lalu';
@@ -89,13 +89,6 @@ class _ProfilScreenState extends State<ProfilScreen> {
       ),
     );
     await _load();
-  }
-
-  void _openTest() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => TestScreen(cameras: widget.cameras)),
-    );
   }
 
   Future<void> _logout() async {

@@ -9,11 +9,13 @@ import 'package:uuid/uuid.dart';
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:geolocator/geolocator.dart';
+import '../../services/gps_service_plugin.dart';
+import '../../services/worker/face_worker.dart';
 import '../../services/db/database_service.dart';
 import '../../services/db/sync_service.dart';
 import '../../services/gps/gps_service.dart';
+import '../../services/time/time_verifier.dart';
 import '../../services/model/mobilefacenet_service.dart';
-import '../../services/model/mtcnn_service.dart';
 import '../../services/monotonic_clock.dart';
 import '../../services/net-service/sync_watchdog.dart';
 import '../../utils/camera_image_utils.dart';
@@ -45,7 +47,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   CameraController? _controller;
   DateTime _lastProcessTime = DateTime.now();
 
-  final MTCNNService _mtcnnService = MTCNNService();
+  FaceWorker? _worker;
   final MobileFaceNetService _mobileFaceNetService = MobileFaceNetService();
   final GpsService _gpsService = GpsService();
   static const _uuid = Uuid();
@@ -61,7 +63,6 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
   String _statusMessage = "Kamera Nonaktif\nKetuk kotak kamera di atas untuk mulai";
   Color _statusColor = Colors.white54;
-  FaceRecognitionResult? _latestTelemetry;
 
   bool _isIzinMode = false;
   String _izinType = 'izin';
@@ -100,6 +101,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   List<double>? _matchedEmbedding;
 
   bool _sessionLogged = false;
+  TimeStatus? _timeStatus;
+  bool _mockDetected = false;
 
   int? _deviceUptimeMs;
   int? _deviceBootTimeMs;
@@ -391,6 +394,9 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     _matchedMode = null;
     _matchedEmbedding = null;
     _sessionLogged = false;
+    _timeStatus = null;
+
+    _mockDetected = false; 
 
     _deviceUptimeMs = null;
     _deviceBootTimeMs = null;
@@ -513,9 +519,10 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         deviceUptimeMs: _deviceUptimeMs,
         deviceBootTimeMs: _deviceBootTimeMs,
         luxValue: _luxValue,
+        timeStatus: _timeStatus?.dbValue,
       );
       _sessionLogged = true;
-      debugPrint("STREAM: session $finalStatus logged (session=${_currentSessionUuid})");
+      debugPrint("STREAM: session $finalStatus logged (session=$_currentSessionUuid)");
 
       SyncService().syncAll().then((r) {
         debugPrint("STREAM: post-finish sync = $r");
@@ -526,11 +533,32 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     }
   }
 
+  Future<void> _ensureWorkerStarted() async {
+    if (_worker != null && _worker!.isReady) return;
+
+    debugPrint("WORKER: start");
+    _worker?.dispose();
+    _worker = FaceWorker();
+
+    final pnet = await rootBundle.load('assets/models/pnet.tflite');
+    final rnet = await rootBundle.load('assets/models/rnet.tflite');
+    final onet = await rootBundle.load('assets/models/onet.tflite');
+    final mfn = await rootBundle.load('assets/models/mobilefacenet.tflite');
+
+    await _worker!.start(
+      pnetBytes: pnet.buffer.asUint8List(),
+      rnetBytes: rnet.buffer.asUint8List(),
+      onetBytes: onet.buffer.asUint8List(),
+      mfnBytes: mfn.buffer.asUint8List(),
+    );
+    debugPrint("WORKER: ready");
+  }
+
   Future<void> _toggleOrStartCamera() async {
     if (_isLoading || _isProcessingGps) return;
 
     if (!_isCameraActive && !_canStartCamera) {
-      debugPrint("STREAM: tidak bisa mulai. ${_disabledReason}");
+      debugPrint("STREAM: tidak bisa mulai. $_disabledReason");
       setState(() {
         _statusMessage = _disabledReason;
         _statusColor = Colors.white54;
@@ -586,10 +614,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     });
 
     try {
-      await _mtcnnService.init();
-      if (!_mobileFaceNetService.isModelLoaded) {
-        await _mobileFaceNetService.init();
-      }
+      await _ensureWorkerStarted();
 
       await _stopAndDisposeCamera();
       await Future.delayed(const Duration(milliseconds: 250));
@@ -710,6 +735,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   Future<void> _processFrame(CameraImage cameraImage) async {
     final tFrameStart = DateTime.now();
 
+    // 1. Convert + rotate + resize (main thread, cepat)
     final rawRgb = convertCameraImageToRgb(cameraImage);
     if (rawRgb == null) return;
 
@@ -720,16 +746,35 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         ? img.copyResize(oriented, width: targetWidth)
         : oriented;
 
-    final tMtcStart = DateTime.now();
-    final faces = await _mtcnnService.detectFaces(working, isGlassesMode: true);
-    final mtcnnMs = DateTime.now().difference(tMtcStart).inMilliseconds;
-    if (_mtcnnMsFirst == null) _mtcnnMsFirst = mtcnnMs;
+    // 2. Ambil bytes mentah
+    final Uint8List rgbBytes = Uint8List.fromList(
+      working.getBytes(order: img.ChannelOrder.rgb),
+    );
+
+    // 3. Kirim ke worker
+    final worker = _worker;
+    if (worker == null || !worker.isReady) {
+      debugPrint("STREAM: worker belum siap");
+      return;
+    }
+
+    final result = await worker.processFrame(
+      rgb: rgbBytes,
+      width: working.width,
+      height: working.height,
+      isGlassesMode: true,
+    );
+
+    final mtcnnMs = result.mtcnnMs;
+    final mfnMs = result.mfnMs;
+    _mtcnnMsFirst ??= mtcnnMs;
 
     _attemptNumber++;
 
-    if (faces.isEmpty) {
+    if (!result.faceDetected) {
       _failedCount++;
-      debugPrint("STREAM: MTCNN 0 wajah (attempt=$_attemptNumber, failed=$_failedCount, ${mtcnnMs}ms)");
+      debugPrint(
+          "STREAM: MTCNN 0 wajah (attempt=$_attemptNumber, failed=$_failedCount, ${mtcnnMs}ms)");
 
       await _logFaceAttempt(
         attemptNumber: _attemptNumber,
@@ -746,20 +791,26 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       return;
     }
 
-    if (_firstFaceAt == null) _firstFaceAt = DateTime.now();
+    _firstFaceAt ??= DateTime.now();
 
-    final bestFace = faces.reduce((a, b) => a.score > b.score ? a : b);
-    final aligned = _mtcnnService.alignAndCropFace(working, bestFace);
-    final alignedWithLm = _mtcnnService.alignCropAndDrawLandmarks(working, bestFace);
+    // Decode JPG hasil worker jadi img.Image
+    img.Image? aligned;
+    img.Image? alignedWithLm;
+    try {
+      if (result.alignedJpg != null) {
+        aligned = img.decodeImage(result.alignedJpg!);
+      }
+      if (result.alignedLmJpg != null) {
+        alignedWithLm = img.decodeImage(result.alignedLmJpg!);
+      }
+    } catch (e) {
+      debugPrint("STREAM: decode aligned error -> $e");
+    }
 
-    final tMfnStart = DateTime.now();
-    final embedding = _mobileFaceNetService.predict(aligned);
-    final mfnMs = DateTime.now().difference(tMfnStart).inMilliseconds;
-    if (_mfnMsFirst == null) _mfnMsFirst = mfnMs;
-
-    if (embedding == null) {
+    if (!result.mfnOk || result.embedding == null) {
       _failedCount++;
-      debugPrint("STREAM: MFN null (attempt=$_attemptNumber, failed=$_failedCount, ${mfnMs}ms)");
+      debugPrint(
+          "STREAM: MFN null (attempt=$_attemptNumber, failed=$_failedCount, ${mfnMs}ms)");
 
       await _logFaceAttempt(
         attemptNumber: _attemptNumber,
@@ -778,10 +829,12 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       return;
     }
 
+    // 4. Matching (main thread, cepat)
+    final embedding = result.embedding!;
     final tMatchStart = DateTime.now();
     final telemetry = _mobileFaceNetService.evaluateFace(embedding);
     final matchMs = DateTime.now().difference(tMatchStart).inMilliseconds;
-    if (_matchMsFirst == null) _matchMsFirst = matchMs;
+    _matchMsFirst ??= matchMs;
 
     final totalFrameMs = DateTime.now().difference(tFrameStart).inMilliseconds;
 
@@ -793,14 +846,18 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         "isMatch=${telemetry.isMatch}  "
         "(failed=$_failedCount)");
 
-    _mobileFaceNetService.recordAttempt(faceImage: aligned, telemetry: telemetry);
-
-    if (mounted) setState(() => _latestTelemetry = telemetry);
+    if (aligned != null) {
+      _mobileFaceNetService.recordAttempt(
+        faceImage: aligned,
+        telemetry: telemetry,
+      );
+    }
 
     if (!telemetry.isMatch) {
       _failedCount++;
 
-      if (_bestFailedDistance == null || telemetry.distance < _bestFailedDistance!) {
+      if (_bestFailedDistance == null ||
+          telemetry.distance < _bestFailedDistance!) {
         _bestFailedDistance = telemetry.distance;
         _bestFailedPhoto = alignedWithLm;
       }
@@ -816,7 +873,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
       if (mounted) {
         setState(() {
-          _statusMessage = "Wajah Tidak Dikenali!\nGagal: $_failedCount/$_maxFaceAttempts";
+          _statusMessage =
+              "Wajah Tidak Dikenali!\nGagal: $_failedCount/$_maxFaceAttempts";
           _statusColor = Colors.redAccent;
         });
       }
@@ -862,13 +920,23 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       matchDistance: telemetry.distance,
     );
 
-    debugPrint("STREAM: MATCH! distance=${telemetry.distance.toStringAsFixed(4)} mode=${telemetry.matchMode}");
+    debugPrint(
+        "STREAM: MATCH! distance=${telemetry.distance.toStringAsFixed(4)} mode=${telemetry.matchMode}");
 
     if (mounted) {
       setState(() {
         _statusMessage = "Wajah Valid ✅\nMenghentikan kamera...";
         _statusColor = Colors.greenAccent;
       });
+    }
+
+    // Cek waktu sebelum GPS
+    final timeOk = await _verifyTimeStatus();
+    if (!timeOk) {
+      await _stopWarmup();
+      await _finishSession(finalStatus: 'time_rejected');
+      await _stopAndDisposeCamera();
+      return;
     }
 
     _isDetecting = false;
@@ -899,7 +967,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       return;
     }
 
-    await MonotonicClock.startGpsService();
+    await GpsServicePlugin.startGpsService();
     debugPrint("FOREGROUND_SERVICE: start");
 
     if (mounted) {
@@ -1002,13 +1070,14 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
           statusPrefix: "Cek lokasi GPS",
         );
         lastResult = outcome.result;
-        if (outcome.fix != null &&
-            (bestFix == null || outcome.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
-          bestFix = outcome.fix;
-          bestDistance = outcome.distance;
+        final fix = outcome.fix;
+        final dist = outcome.distance;
+        if (fix != null) {
+          bestFix = fix;
+          bestDistance = dist;
         }
-        if (outcome.result == 'success') {
-          await _handleGpsSuccess(outcome.fix!, outcome.distance!, now);
+        if (outcome.result == 'success' && fix != null && dist != null) {
+          await _handleGpsSuccess(fix, dist, now);
           return;
         }
         if (outcome.result == 'timeout') {
@@ -1030,7 +1099,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         );
         lastResult = stageA.result;
         if (stageA.fix != null &&
-            (bestFix == null || stageA.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+            (bestFix == null || stageA.fix!.accuracyMeters < bestFix.accuracyMeters)) {
           bestFix = stageA.fix;
           bestDistance = stageA.distance;
         }
@@ -1051,7 +1120,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
           );
           lastResult = stageB.result;
           if (stageB.fix != null &&
-              (bestFix == null || stageB.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+              (bestFix == null || stageB.fix!.accuracyMeters < bestFix.accuracyMeters)) {
             bestFix = stageB.fix;
             bestDistance = stageB.distance;
           }
@@ -1081,7 +1150,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         );
         lastResult = outcome.result;
         if (outcome.fix != null &&
-            (bestFix == null || outcome.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+            (bestFix == null || outcome.fix!.accuracyMeters < bestFix.accuracyMeters)) {
           bestFix = outcome.fix;
           bestDistance = outcome.distance;
         }
@@ -1104,7 +1173,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         );
         lastResult = outcome.result;
         if (outcome.fix != null &&
-            (bestFix == null || outcome.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+            (bestFix == null || outcome.fix!.accuracyMeters < bestFix.accuracyMeters)) {
           bestFix = outcome.fix;
           bestDistance = outcome.distance;
         }
@@ -1124,7 +1193,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         );
         lastResult = stageA.result;
         if (stageA.fix != null &&
-            (bestFix == null || stageA.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+            (bestFix == null || stageA.fix!.accuracyMeters < bestFix.accuracyMeters)) {
           bestFix = stageA.fix;
           bestDistance = stageA.distance;
         }
@@ -1145,7 +1214,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
           );
           lastResult = stageB.result;
           if (stageB.fix != null &&
-              (bestFix == null || stageB.fix!.accuracyMeters < bestFix!.accuracyMeters)) {
+              (bestFix == null || stageB.fix!.accuracyMeters < bestFix.accuracyMeters)) {
             bestFix = stageB.fix;
             bestDistance = stageB.distance;
           }
@@ -1176,12 +1245,38 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     } finally {
       _isProcessingGps = false;
       _gpsActive = false;
-      await MonotonicClock.stopGpsService();
+      await GpsServicePlugin.stopGpsService();
       debugPrint("FOREGROUND_SERVICE: stop");
       await WakelockPlus.disable();
       debugPrint("WAKELOCK: disabled (GPS done)");
     }
   }
+
+  Future<bool> _verifyTimeStatus() async {
+  final status = await TimeVerifier.check();
+  _timeStatus = status;
+
+  if (status == TimeStatus.mismatch) {
+    debugPrint("STREAM: time mismatch → reject");
+    return false;
+  }
+
+  if (status == TimeStatus.restart || status == TimeStatus.noAnchor) {
+    if (_debugSkipTimeCheck) {
+      debugPrint("STREAM: $status, skip time check (debug)");
+      return true;
+    }
+    final now = DateTime.now();
+    final inWindow = _isIzinMode ? _isIzinOpen(now) : _isAbsenOpen(now);
+    if (!inWindow) {
+      debugPrint("STREAM: $status + jam di luar window → reject");
+      return false;
+    }
+    debugPrint("STREAM: $status, jam wajar → terima");
+  }
+
+  return true;
+}
 
   Future<void> _handleGpsFailed({
     required String result,
@@ -1198,7 +1293,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     }
 
     await _finishSession(
-      finalStatus: 'gps_failed',
+      finalStatus: result == 'mock_detected' ? 'gps_mock' : 'gps_failed',
       gpsResult: result,
       gpsMs: totalGpsMs,
       photoPath: photoPath,
@@ -1238,6 +1333,9 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     int? hintAtSeconds,
     String? hintText,
   }) async {
+    if (_mockDetected) {
+      return _AttemptOutcome(fix: null, distance: null, result: 'mock_detected');
+    }
     final tStart = DateTime.now();
     while (true) {
       _needsRestartAttempt = false;
@@ -1326,6 +1424,10 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
     if (gps == null) {
       result = 'timeout';
+    } else if (gps.isMocked) {
+      distance = _gpsService.distanceBetween(sekolahLat, sekolahLng, gps.lat, gps.lng);
+      result = 'mock_detected';
+      debugPrint("STREAM: MOCK GPS terdeteksi (acc=${gps.accuracyMeters.toStringAsFixed(1)}m)");
     } else {
       distance = _gpsService.distanceBetween(sekolahLat, sekolahLng, gps.lat, gps.lng);
       if (gps.isValid && (_isIzinMode || distance <= radius)) {
@@ -1341,6 +1443,10 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
           _statusMessage = "Wajah Valid ✅\n$statusPrefix...\n(acc: ${gps.accuracyMeters.toStringAsFixed(1)}m)";
         });
       }
+    }
+
+    if (result == 'mock_detected') {
+      _mockDetected = true;
     }
 
     debugPrint("GPS: attempt $number [$mode] ($statusPrefix) → $result (${durationMs}ms)");
@@ -1361,6 +1467,16 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   }
 
   Future<void> _handleGpsSuccess(GpsResult fix, double distance, DateTime now) async {
+    if (_mockDetected) {
+      debugPrint("STREAM: mock GPS terdeteksi → tolak");
+      await _handleGpsFailed(
+        result: 'mock_detected',
+        bestFix: fix,
+        bestDistance: distance,
+        radius: 0,
+      );
+      return;
+    }
     _gpsDoneAt = DateTime.now();
     final totalGpsMs = _gpsDoneAt!.difference(_gpsStartAt!).inMilliseconds;
     final late = _isLate(now);
@@ -1457,6 +1573,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       _finishSession(finalStatus: 'cancelled');
     }
     _stopAndDisposeCamera();
+    _worker?.dispose();
+    _worker = null;
     super.dispose();
   }
 

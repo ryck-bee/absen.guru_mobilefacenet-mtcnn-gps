@@ -168,7 +168,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             fontSize: 14,
-                            color: AppColors.darkSlate.withOpacity(0.7),
+                            color: AppColors.darkSlate.withValues(alpha: 0.7),
                             height: 1.4,
                           ),
                         ),
@@ -232,7 +232,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         disabledBorder: UnderlineInputBorder(
           borderSide: BorderSide(
-            color: lineColor.withOpacity(0.4),
+            color: lineColor.withValues(alpha: 0.4),
             width: 1.5,
           ),
         ),
@@ -317,7 +317,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 backgroundColor: AppColors.tealMedium,
                 foregroundColor: Colors.white,
                 disabledBackgroundColor:
-                    AppColors.tealMedium.withOpacity(0.5),
+                    AppColors.tealMedium.withValues(alpha: 0.5),
                 elevation: 0,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -392,7 +392,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
         disabledBorder: UnderlineInputBorder(
           borderSide: BorderSide(
-            color: lineColor.withOpacity(0.4),
+            color: lineColor.withValues(alpha: 0.4),
             width: 1.5,
           ),
         ),

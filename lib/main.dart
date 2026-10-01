@@ -60,6 +60,7 @@ Future<void> main() async {
   try {
     await Supabase.initialize(
       url: SupabaseConfig.url,
+      // ignore: deprecated_member_use
       anonKey: SupabaseConfig.anonKey,
     );
     debugPrint("SUPABASE: Initialized");
@@ -75,7 +76,7 @@ Future<void> main() async {
   }
 
   // Fallback: kalau androidId null (custom OS / AOSP), pakai UUID lokal.
-  try {
+    try {
     if (gAndroidId.isEmpty) {
       final existing = await DatabaseService.instance.getDeviceLocal();
       final savedId = existing?['android_id'] as String?;
@@ -116,93 +117,130 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Absensi Wajah',
-      debugShowCheckedModeBanner: false,
-      color: AppColors.cream,
-      theme: ThemeData(
-        fontFamily: 'Quicksand',
-        useMaterial3: true,
-        scaffoldBackgroundColor: AppColors.cream,
-        colorScheme: const ColorScheme.light(
-          primary: AppColors.tealMedium,
-          onPrimary: Colors.white,
-          secondary: AppColors.tealMedium,
-          onSecondary: Colors.white,
-          surface: AppColors.cream,
-          onSurface: AppColors.darkSlate,
-          error: AppColors.error,
-          onError: Colors.white,
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.transparent,
-          foregroundColor: AppColors.darkSlate,
-          elevation: 0,
-          systemOverlayStyle: SystemUiOverlayStyle(
-            statusBarColor: Colors.transparent,
-            statusBarIconBrightness: Brightness.dark,
-            statusBarBrightness: Brightness.light,
+    return _LogLifecycle(
+      child: MaterialApp(
+        title: 'Absensi Wajah',
+        debugShowCheckedModeBanner: false,
+        color: AppColors.cream,
+        theme: ThemeData(
+          fontFamily: 'Quicksand',
+          useMaterial3: true,
+          scaffoldBackgroundColor: AppColors.cream,
+          colorScheme: const ColorScheme.light(
+            primary: AppColors.tealMedium,
+            onPrimary: Colors.white,
+            secondary: AppColors.tealMedium,
+            onSecondary: Colors.white,
+            surface: AppColors.cream,
+            onSurface: AppColors.darkSlate,
+            error: AppColors.error,
+            onError: Colors.white,
           ),
-        ),
-        dialogTheme: const DialogThemeData(
-          backgroundColor: AppColors.cream,
-          surfaceTintColor: Colors.transparent,
-        ),
-        bottomSheetTheme: const BottomSheetThemeData(
-          backgroundColor: AppColors.cream,
-          surfaceTintColor: Colors.transparent,
-        ),
-        snackBarTheme: const SnackBarThemeData(
-          backgroundColor: AppColors.darkSlate,
-          contentTextStyle: TextStyle(color: Colors.white),
-        ),
-        cardTheme: const CardThemeData(
-          color: AppColors.creamDark,
-          surfaceTintColor: Colors.transparent,
-        ),
-        switchTheme: SwitchThemeData(
-          thumbColor: WidgetStateProperty.resolveWith((states) {
-            if (states.contains(WidgetState.selected)) {
-              return AppColors.tealMedium;
-            }
-            return null;
-          }),
-          trackColor: WidgetStateProperty.resolveWith((states) {
-            if (states.contains(WidgetState.selected)) {
-              return AppColors.tealMedium.withOpacity(0.5);
-            }
-            return null;
-          }),
-        ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.tealMedium,
-            foregroundColor: Colors.white,
+          appBarTheme: const AppBarTheme(
+            backgroundColor: Colors.transparent,
+            foregroundColor: AppColors.darkSlate,
             elevation: 0,
+            systemOverlayStyle: SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness: Brightness.dark,
+              statusBarBrightness: Brightness.light,
+            ),
+          ),
+          dialogTheme: const DialogThemeData(
+            backgroundColor: AppColors.cream,
+            surfaceTintColor: Colors.transparent,
+          ),
+          bottomSheetTheme: const BottomSheetThemeData(
+            backgroundColor: AppColors.cream,
+            surfaceTintColor: Colors.transparent,
+          ),
+          snackBarTheme: const SnackBarThemeData(
+            backgroundColor: AppColors.darkSlate,
+            contentTextStyle: TextStyle(color: Colors.white),
+          ),
+          cardTheme: const CardThemeData(
+            color: AppColors.creamDark,
+            surfaceTintColor: Colors.transparent,
+          ),
+          switchTheme: SwitchThemeData(
+            thumbColor: WidgetStateProperty.resolveWith((states) {
+              if (states.contains(WidgetState.selected)) {
+                return AppColors.tealMedium;
+              }
+              return null;
+            }),
+            trackColor: WidgetStateProperty.resolveWith((states) {
+              if (states.contains(WidgetState.selected)) {
+                AppColors.tealMedium.withValues(alpha: 0.5);
+              }
+              return null;
+            }),
+          ),
+          elevatedButtonTheme: ElevatedButtonThemeData(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.tealMedium,
+              foregroundColor: Colors.white,
+              elevation: 0,
+            ),
+          ),
+          outlinedButtonTheme: OutlinedButtonThemeData(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.tealMedium,
+              side: const BorderSide(color: AppColors.tealMedium, width: 1.5),
+            ),
+          ),
+          textButtonTheme: TextButtonThemeData(
+            style: TextButton.styleFrom(foregroundColor: AppColors.tealMedium),
+          ),
+          pageTransitionsTheme: const PageTransitionsTheme(
+            builders: {
+              TargetPlatform.android: FadeUpwardsPageTransitionsBuilder(),
+              TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+            },
           ),
         ),
-        outlinedButtonTheme: OutlinedButtonThemeData(
-          style: OutlinedButton.styleFrom(
-            foregroundColor: AppColors.tealMedium,
-            side: const BorderSide(color: AppColors.tealMedium, width: 1.5),
-          ),
-        ),
-        textButtonTheme: TextButtonThemeData(
-          style: TextButton.styleFrom(foregroundColor: AppColors.tealMedium),
-        ),
-        pageTransitionsTheme: const PageTransitionsTheme(
-          builders: {
-            TargetPlatform.android: FadeUpwardsPageTransitionsBuilder(),
-            TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
-          },
-        ),
-      ),
-      builder: (context, child) {
-        return LoadingOverlay(child: child ?? const SizedBox.shrink());
-      },
-      home: const AuthGate(),
+        builder: (context, child) {
+          return LoadingOverlay(child: child ?? const SizedBox.shrink());
+        },
+        home: const AuthGate(),
+      )
     );
   }
+}
+
+/// Wrapper untuk flush log saat app minimize/background.
+class _LogLifecycle extends StatefulWidget {
+  final Widget child;
+  const _LogLifecycle({required this.child});
+
+  @override
+  State<_LogLifecycle> createState() => _LogLifecycleState();
+}
+
+class _LogLifecycleState extends State<_LogLifecycle>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      DebugLogger.instance.flushNow();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class AuthGate extends StatelessWidget {

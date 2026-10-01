@@ -2,19 +2,22 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import '../db/sync_service.dart';
+import '../mock_location.dart';
 
 class GpsResult {
   final double lat;
   final double lng;
   final double accuracyMeters;
+  final bool isMocked;
 
   GpsResult({
     required this.lat,
     required this.lng,
     required this.accuracyMeters,
+    this.isMocked = false,
   });
 
-  bool get isValid => accuracyMeters <= GpsService.maxAccuracyMeters;
+  bool get isValid => accuracyMeters <= GpsService.maxAccuracyMeters && !isMocked;
 }
 
 class GpsService {
@@ -46,6 +49,11 @@ class GpsService {
     return true;
   }
 
+  /// Cek native mock location. Return true kalau ada mock aktif.
+  Future<bool> isMockLocationActive() async {
+    return await MockLocation.check();
+  }
+
   /// Stream mentah posisi GPS. Tanpa logic valid/timeout.
   /// Dipakai untuk warmup (jalan di background).
   Stream<GpsResult> watchPosition({required bool useSatellite}) {
@@ -60,6 +68,7 @@ class GpsService {
         lat: pos.latitude,
         lng: pos.longitude,
         accuracyMeters: pos.accuracy,
+        isMocked: pos.isMocked,
       ),
     );
   }
@@ -96,6 +105,7 @@ class GpsService {
         lat: pos.latitude,
         lng: pos.longitude,
         accuracyMeters: pos.accuracy,
+        isMocked: pos.isMocked,
       );
 
     } on TimeoutException {
@@ -166,6 +176,7 @@ class GpsService {
             lat: pos.latitude,
             lng: pos.longitude,
             accuracyMeters: pos.accuracy,
+            isMocked: pos.isMocked,
           );
 
           if (bestFix == null || fix.accuracyMeters < bestFix!.accuracyMeters) {

@@ -34,7 +34,8 @@ class DebugLogger {
       _initialized = true;
       _capturing = true;
 
-      _flushTimer = Timer.periodic(const Duration(seconds: 5), (_) => _flush());
+      // Flush agresif: tiap 1 detik, biar crash tidak menghilangkan log.
+      _flushTimer = Timer.periodic(const Duration(seconds: 1), (_) => _flush());
       _flush();
     } catch (e) {
       debugPrintSynchronously('DebugLogger init error: $e');
@@ -89,7 +90,6 @@ class DebugLogger {
     }
   }
 
-  /// Tulis satu baris ke file learning_log.txt.
   Future<void> appendLearning(String line) async {
     try {
       await _ensureLearningFile();

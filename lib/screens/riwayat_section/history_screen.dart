@@ -358,7 +358,7 @@ class _HistoryCardState extends State<HistoryCard>
           borderRadius: BorderRadius.circular(12),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.12),
+              color: Colors.black.withValues(alpha: 0.12),
               blurRadius: 8,
               offset: const Offset(0, 3),
             ),
@@ -418,7 +418,7 @@ class _HistoryCardState extends State<HistoryCard>
             Text(
               _formatDateShort(widget.entry.date),
               style: TextStyle(
-                color: Colors.white.withOpacity(0.8),
+                color: Colors.white.withValues(alpha: 0.8),
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
               ),
@@ -455,7 +455,7 @@ class _HistoryCardState extends State<HistoryCard>
         child: Text(
           'Diharapkan mencari koneksi internet sebelum kadaluarsa.',
           style: TextStyle(
-            color: Colors.white.withOpacity(0.7),
+            color: Colors.white.withValues(alpha: 0.7),
             fontSize: 11,
             fontStyle: FontStyle.italic,
           ),
@@ -506,7 +506,7 @@ class _HistoryCardState extends State<HistoryCard>
 
   Widget _buildEmptyThumbnail() {
     return Container(
-      color: Colors.black.withOpacity(0.25),
+      color: Colors.black.withValues(alpha: 0.25),
       child: const Center(
         child: Icon(
           Icons.person_off,
@@ -526,7 +526,7 @@ class _HistoryCardState extends State<HistoryCard>
           Text(
             label,
             style: TextStyle(
-              color: Colors.white.withOpacity(0.75),
+              color: Colors.white.withValues(alpha:0.75),
               fontSize: 12,
             ),
           ),

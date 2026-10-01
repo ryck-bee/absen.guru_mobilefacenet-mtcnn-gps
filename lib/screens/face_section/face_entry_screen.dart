@@ -728,7 +728,7 @@ class _FaceEntryScreenState extends State<FaceEntryScreen> {
         style: ElevatedButton.styleFrom(
           backgroundColor: AppColors.tealMedium,
           foregroundColor: Colors.white,
-          disabledBackgroundColor: AppColors.tealMedium.withOpacity(0.5),
+          disabledBackgroundColor: AppColors.tealMedium.withValues(alpha: 0.5),
           elevation: 0,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
@@ -775,7 +775,7 @@ class _FaceEntryScreenState extends State<FaceEntryScreen> {
               ),
               backgroundColor: enabled
                   ? Colors.transparent
-                  : const Color(0xFFE0E0E0).withOpacity(0.5),
+                  : const Color(0xFFE0E0E0).withValues(alpha: 0.5),
             ),
             child: _importing
                 ? const SizedBox(

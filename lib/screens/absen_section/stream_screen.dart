@@ -9,7 +9,9 @@ import 'package:uuid/uuid.dart';
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:battery_plus/battery_plus.dart';
 import '../../services/gps_service_plugin.dart';
+import '../../services/notif_service.dart';
 import '../../services/worker/face_worker.dart';
 import '../../services/db/database_service.dart';
 import '../../services/db/sync_service.dart';
@@ -21,6 +23,7 @@ import '../../services/net-service/sync_watchdog.dart';
 import '../../utils/camera_image_utils.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_spacing.dart';
+import '../../widgets/app_spinner.dart';
 
 class StreamScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -67,14 +70,21 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   bool _isIzinMode = false;
   String _izinType = 'izin';
 
+  bool _useFrontCamera = true;
+
   bool _isOnline = false;
   Timer? _onlineCheckTimer;
+  Timer? _absenClockTimer;
 
   // Cek wajah terdaftar (fresh install).
   bool _hasRegisteredFace = false;
 
+  Set<String> _hariLibur = {};
+
   String? _currentSessionUuid;
+  String? _rawPhotoPath;
   String? _currentUserId;
+  String? _todayBlockMessage;
   DateTime? _sessionStartedAt;
   DateTime? _cameraReadyAt;
   DateTime? _firstFaceAt;
@@ -88,6 +98,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   int? _mtcnnMsFinal;
   int? _mfnMsFinal;
   int? _matchMsFinal;
+  int? _offlineDurationMs;
+  int? _batteryLevel;
 
   int _failedCount = 0;
   int _attemptNumber = 0;
@@ -122,8 +134,9 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   static const int _menitMasukOnTime = 30;
   static const int _jamAbsenTutup = 10;
   static const int _menitAbsenTutup = 30;
-  static const bool _debugSkipTimeCheck = true;
+  static const bool _debugSkipTimeCheck = false;
   static const bool _debugForceDisable = false;
+  // keperluan debug panggil "Debug Flag"
 
   bool get _isCameraReady =>
       _isCameraActive && !_isLoading && _controller != null && _controller!.value.isInitialized;
@@ -144,6 +157,13 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     _onlineCheckTimer = Timer.periodic(
       const Duration(seconds: 30),
       (_) => _checkOnline(),
+    );
+    // Refresh text status tiap 30 detik.
+    _absenClockTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) {
+        if (mounted) setState(() {});
+      },
     );
 
     _checkRegisteredFace();
@@ -204,12 +224,74 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   }
 
   bool _isAbsenOpen(DateTime t) {
+    if (t.weekday == DateTime.sunday) return false;
+    if (_hariLibur.contains(_dateKey(t))) return false;
     final open = DateTime(t.year, t.month, t.day, 6, 30);
     final close = DateTime(t.year, t.month, t.day, 10, 30);
     return t.isAfter(open) && t.isBefore(close);
   }
 
+  String _dateKey(DateTime d) {
+    return '${d.year.toString().padLeft(4, '0')}-'
+        '${d.month.toString().padLeft(2, '0')}-'
+        '${d.day.toString().padLeft(2, '0')}';
+  }
+
+  /// Teks di kotak kamera saat kamera tidak aktif.
+  /// Fokus: KONDISI saat ini (bukan instruksi, bukan hitung waktu).
+  String get _cameraBoxText {
+    if (_debugForceDisable) return "Absen tidak tersedia";
+    if (!_hasRegisteredFace) return "Wajah belum terdaftar";
+    if (_todayBlockMessage != null) return _todayBlockMessage!;
+
+    final now = DateTime.now();
+    if (now.weekday == DateTime.sunday) return "Absen ditutup (hari libur)";
+    if (_hariLibur.contains(_dateKey(now))) return "Absen ditutup (hari libur)";
+
+    if (_isIzinMode) {
+      return _isIzinOpen(now) ? "Izin Tersedia" : "Izin Ditutup";
+    }
+    return _isAbsenOpen(now) ? "Absen Tersedia" : "Absen Ditutup";
+  }
+
+  /// Teks di kotak status bawah.
+  /// Fokus: INFO WAKTU buka berikutnya (bukan instruksi).
+  String get _statusBottomText {
+    if (_debugForceDisable) return "—";
+    if (!_hasRegisteredFace) return "Daftar wajah dulu di Pengaturan";
+
+    final now = DateTime.now();
+
+    if (now.weekday == DateTime.sunday) return "Libur hari ini";
+    if (_hariLibur.contains(_dateKey(now))) return "Libur hari ini";
+
+    if (_todayBlockMessage != null) {
+      return _isIzinMode ? "Buka besok jam 5:00" : "Buka besok jam 6:30";
+    }
+
+    if (_isIzinMode) {
+      if (_isIzinOpen(now)) return "Buka 5:00 - 12:00";
+      final open = DateTime(now.year, now.month, now.day, 5, 0);
+      if (now.isBefore(open)) return _formatCountdown(open.difference(now));
+      return "Buka besok jam 5:00";
+    }
+
+    final open = DateTime(now.year, now.month, now.day, 6, 30);
+    final close = DateTime(now.year, now.month, now.day, 10, 30);
+
+    if (now.isAfter(open) && now.isBefore(close)) return "Buka 6:30 - 10:30";
+    if (now.isBefore(open)) return _formatCountdown(open.difference(now));
+    return "Buka besok jam 6:30";
+  }
+
+  String _formatCountdown(Duration d) {
+    if (d.inMinutes < 5) return "Dibuka segera";
+    if (d.inMinutes < 60) return "${d.inMinutes} menit lagi";
+    return "${d.inHours} jam lagi";
+  }
+
   bool _isIzinOpen(DateTime t) {
+    if (_hariLibur.contains(_dateKey(t))) return false;
     final open = DateTime(t.year, t.month, t.day, 5, 0);
     final close = DateTime(t.year, t.month, t.day, 12, 0);
     return t.isAfter(open) && t.isBefore(close);
@@ -218,27 +300,16 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   bool get _canStartCamera {
     if (_debugForceDisable) return false;
     if (!_hasRegisteredFace) return false;
-    if (_debugSkipTimeCheck) return true;
+
+    // Cek libur dulu — independen dari jam.
     final now = DateTime.now();
+    if (now.weekday == DateTime.sunday) return false;
+    if (_hariLibur.contains(_dateKey(now))) return false;
+
+    // Baru cek jam (bisa di-skip kalau debug).
+    if (_debugSkipTimeCheck) return true;
     if (_isIzinMode) return _isIzinOpen(now);
     return _isAbsenOpen(now);
-  }
-
-  String get _disabledReason {
-    if (_debugForceDisable) {
-      return "Absen tidak tersedia\n(06:30 - 10:30)";
-    }
-    if (!_hasRegisteredFace) {
-      return "Wajah belum terdaftar\nBuka Profil → Daftar Wajah";
-    }
-    final now = DateTime.now();
-    if (_isIzinMode && !_isIzinOpen(now)) {
-      return "Di luar jam izin\n(05:00 - 12:00)";
-    }
-    if (!_isIzinMode && !_isAbsenOpen(now)) {
-      return "Absen tidak tersedia\n(06:30 - 10:30)";
-    }
-    return "Absen tidak tersedia";
   }
 
   Future<void> _checkOnline() async {
@@ -252,10 +323,16 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
   Future<void> _checkRegisteredFace() async {
     try {
+      try {
+      _hariLibur = await DatabaseService.instance.getHariLiburSet();
+      } catch (_) {}
       final user = await DatabaseService.instance.getUser();
       if (user == null) return;
       final userId = user['user_id'] as String;
       _currentUserId = userId;
+
+      await _refreshTodayStatus();
+
       final hasFace = _mobileFaceNetService.hasUser(userId);
       if (mounted && hasFace != _hasRegisteredFace) {
         setState(() => _hasRegisteredFace = hasFace);
@@ -265,6 +342,32 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       debugPrint("STREAM: wajah terdaftar = $hasFace (user=$userId)");
     } catch (e) {
       debugPrint("STREAM: cek wajah terdaftar error -> $e");
+    }
+  }
+
+  Future<void> _refreshTodayStatus() async {
+    if (_currentUserId == null) return;
+    try {
+      final row = await DatabaseService.instance.getTodayAttendance(_currentUserId!);
+      String? msg;
+      if (row != null) {
+        final isIzin = (row['is_izin'] as int? ?? 0) == 1;
+        if (isIzin) {
+          final izinType = (row['izin_type'] as String?) ?? 'izin';
+          msg = izinType == 'sakit'
+              ? "Anda sudah tercatat sakit hari ini."
+              : "Anda sudah tercatat izin hari ini.";
+        } else {
+          msg = "Anda sudah absen hari ini.";
+        }
+      }
+      if (mounted && msg != _todayBlockMessage) {
+        setState(() => _todayBlockMessage = msg);
+      } else {
+        _todayBlockMessage = msg;
+      }
+    } catch (e) {
+      debugPrint("STREAM: refresh today status gagal -> $e");
     }
   }
 
@@ -278,6 +381,13 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
           : "Kamera Nonaktif\nKetuk kotak kamera di atas untuk mulai";
       _statusColor = _isIzinMode ? Colors.white70 : Colors.white54;
     });
+  }
+
+  Future<void> _toggleCamera() async {
+    if (_isCameraActive || _isLoading || _isProcessingGps) return;
+    if (widget.cameras.length < 2) return;
+
+    setState(() => _useFrontCamera = !_useFrontCamera);
   }
 
   Future<void> _pickIzinType() async {
@@ -370,7 +480,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   }
 
   void _resetSession() {
-    _currentSessionUuid = null;
+    _rawPhotoPath = null;
     _sessionStartedAt = null;
     _cameraReadyAt = null;
     _firstFaceAt = null;
@@ -400,13 +510,20 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
     _deviceUptimeMs = null;
     _deviceBootTimeMs = null;
+    _offlineDurationMs = null;
+    _batteryLevel = null;
 
     _warmupBestFix = null;
     _forceCancelGps = false;
     _needsRestartAttempt = false;
   }
 
-  Future<String?> _savePhotoToDisk(img.Image image, String sessionUuid, String tag) async {
+  Future<String?> _savePhotoToDisk(
+    img.Image image,
+    String sessionUuid,
+    String tag, {
+    int quality = 75,
+  }) async {
     try {
       final user = await DatabaseService.instance.getUser();
       if (user == null) return null;
@@ -417,7 +534,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
       final filename = '${sessionUuid}_$tag.jpg';
       final fullPath = p.join(userDir.path, filename);
-      final jpg = img.encodeJpg(image, quality: 75);
+      final jpg = img.encodeJpg(image, quality: quality);
       await File(fullPath).writeAsBytes(jpg);
       return fullPath;
     } catch (e) {
@@ -516,8 +633,11 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         finalStatus: finalStatus,
         finalAt: DateTime.now(),
         photoPath: photoPath,
+        rawPhotoPath: _rawPhotoPath,
         deviceUptimeMs: _deviceUptimeMs,
         deviceBootTimeMs: _deviceBootTimeMs,
+        offlineDurationMs: _offlineDurationMs,
+        batteryLevel: _batteryLevel,
         luxValue: _luxValue,
         timeStatus: _timeStatus?.dbValue,
       );
@@ -557,10 +677,25 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   Future<void> _toggleOrStartCamera() async {
     if (_isLoading || _isProcessingGps) return;
 
+    // Refresh status hari ini (siapa tau sudah absen/izin dari device lain).
+    if (!_isCameraActive) {
+      await _refreshTodayStatus();
+    }
+
+    if (!_isCameraActive && _todayBlockMessage != null) {
+      if (mounted) {
+        setState(() {
+          _statusMessage = _todayBlockMessage!;
+          _statusColor = Colors.redAccent;
+        });
+      }
+      return;
+    }
+
     if (!_isCameraActive && !_canStartCamera) {
-      debugPrint("STREAM: tidak bisa mulai. $_disabledReason");
+      debugPrint("STREAM: tidak bisa mulai. $_cameraBoxText");
       setState(() {
-        _statusMessage = _disabledReason;
+        _statusMessage = _cameraBoxText;
         _statusColor = Colors.white54;
       });
       return;
@@ -619,13 +754,21 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       await _stopAndDisposeCamera();
       await Future.delayed(const Duration(milliseconds: 250));
 
-      final frontCamera = widget.cameras.firstWhere(
-        (camera) => camera.lensDirection == CameraLensDirection.front,
-        orElse: () => widget.cameras.first,
-      );
+      final CameraDescription targetCamera;
+      if (_useFrontCamera) {
+        targetCamera = widget.cameras.firstWhere(
+          (c) => c.lensDirection == CameraLensDirection.front,
+          orElse: () => widget.cameras.first,
+        );
+      } else {
+        targetCamera = widget.cameras.firstWhere(
+          (c) => c.lensDirection == CameraLensDirection.back,
+          orElse: () => widget.cameras.first,
+        );
+      }
 
       final controller = CameraController(
-        frontCamera,
+        targetCamera,
         ResolutionPreset.low,
         enableAudio: false,
       );
@@ -741,7 +884,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
     final oriented = correctLiveStreamRotation(rawRgb, _controller!.description);
 
-    const int targetWidth = 480;
+    const int targetWidth = 400;
     final working = oriented.width > targetWidth
         ? img.copyResize(oriented, width: targetWidth)
         : oriented;
@@ -787,6 +930,10 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         await _stopWarmup();
         await _finishSession(finalStatus: 'failed_no_face');
         await _stopAndDisposeCamera();
+        await _showCriticalDialog(
+          'Absen Gagal',
+          'Wajah tidak terdeteksi setelah 10 percobaan. Pastikan pencahayaan cukup dan wajah di tengah lingkaran.',
+        );
       }
       return;
     }
@@ -897,6 +1044,10 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
           photoPath: photoPath,
         );
         await _stopAndDisposeCamera();
+        await _showCriticalDialog(
+          'Absen Gagal',
+          'Wajah tidak dikenali setelah 10 percobaan. Pastikan pencahayaan cukup dan wajah di tengah lingkaran.',
+        );
       }
       return;
     }
@@ -910,6 +1061,35 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     _matchedDistance = telemetry.distance;
     _matchedMode = telemetry.matchMode;
     _matchedEmbedding = embedding;
+
+    // Simpan frame raw (input MTCNN) untuk dataset uji ulang di Python.
+    _rawPhotoPath = await _savePhotoToDisk(
+      working,
+      _currentSessionUuid!,
+      'raw',
+      quality: 100,
+    );
+
+    // Hitung offline duration dari anchor (monotonic clock).
+    try {
+      final anchor = await DatabaseService.instance.getAnchor();
+      final uptimeNow = await MonotonicClock.elapsedRealtimeMs();
+      if (anchor != null && uptimeNow != null) {
+        final uptimeAtSync = (anchor['uptime_at_sync_ms'] as num).toInt();
+        if (uptimeNow >= uptimeAtSync) {
+          _offlineDurationMs = uptimeNow - uptimeAtSync;
+        }
+      }
+    } catch (e) {
+      debugPrint("STREAM: hitung offline_duration gagal -> $e");
+    }
+
+    // Baca battery level.
+    try {
+      _batteryLevel = await Battery().batteryLevel;
+    } catch (e) {
+      debugPrint("STREAM: baca battery level gagal -> $e");
+    }
 
     await _logFaceAttempt(
       attemptNumber: _attemptNumber,
@@ -1253,30 +1433,58 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
   }
 
   Future<bool> _verifyTimeStatus() async {
-  final status = await TimeVerifier.check();
-  _timeStatus = status;
+    final status = await TimeVerifier.check();
+    _timeStatus = status;
 
-  if (status == TimeStatus.mismatch) {
-    debugPrint("STREAM: time mismatch → reject");
-    return false;
-  }
-
-  if (status == TimeStatus.restart || status == TimeStatus.noAnchor) {
-    if (_debugSkipTimeCheck) {
-      debugPrint("STREAM: $status, skip time check (debug)");
-      return true;
-    }
-    final now = DateTime.now();
-    final inWindow = _isIzinMode ? _isIzinOpen(now) : _isAbsenOpen(now);
-    if (!inWindow) {
-      debugPrint("STREAM: $status + jam di luar window → reject");
+    if (status == TimeStatus.mismatch) {
+      debugPrint("STREAM: time mismatch → reject");
+      if (mounted) {
+        setState(() {
+          _statusMessage = "Jam HP tidak sinkron.";
+          _statusColor = Colors.redAccent;
+        });
+      }
+      await _showCriticalDialog(
+        'Jam HP Tidak Sinkron',
+        'Aktifkan tanggal & jam otomatis di pengaturan HP, lalu coba lagi.',
+      );
       return false;
     }
-    debugPrint("STREAM: $status, jam wajar → terima");
+
+    if (status == TimeStatus.restart || status == TimeStatus.noAnchor) {
+      if (_debugSkipTimeCheck) {
+        debugPrint("STREAM: $status, skip time check (debug)");
+        return true;
+      }
+      final now = DateTime.now();
+      final inWindow = _isIzinMode ? _isIzinOpen(now) : _isAbsenOpen(now);
+      if (!inWindow) {
+        debugPrint("STREAM: $status + jam di luar window → reject");
+        return false;
+      }
+      debugPrint("STREAM: $status, jam wajar → terima");
+    }
+
+    return true;
   }
 
-  return true;
-}
+  Future<void> _showCriticalDialog(String title, String body) async {
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Mengerti'),
+          ),
+        ],
+      ),
+    );
+  }
 
   Future<void> _handleGpsFailed({
     required String result,
@@ -1303,7 +1511,11 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
 
     if (mounted) {
       String userMsg;
-      if (result == 'timeout') {
+      bool showDialog = false;
+      if (result == 'mock_detected') {
+        userMsg = "Lokasi palsu terdeteksi.";
+        showDialog = true;
+      } else if (result == 'timeout') {
         userMsg = "GPS tidak mendapat sinyal.\nCoba lagi di area lebih terbuka.";
       } else if (result == 'out_of_radius') {
         final d = bestDistance?.toStringAsFixed(0) ?? '?';
@@ -1319,6 +1531,12 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
           _izinType = 'izin';
         }
       });
+      if (showDialog) {
+        await _showCriticalDialog(
+          'Lokasi Palsu Terdeteksi',
+          'Aplikasi GPS palsu terdeteksi. Matikan aplikasi tersebut di pengaturan HP, lalu coba lagi.',
+        );
+      }
     }
   }
 
@@ -1513,6 +1731,8 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
       photoPath: photoPath,
     );
 
+    NotifService.instance.refreshForUser(_currentUserId!).catchError((_) {});
+
     if (isIzin) {
       debugPrint("STREAM: izin VALID. jarak=${distance.toStringAsFixed(1)}m, "
           "acc=${fix.accuracyMeters.toStringAsFixed(1)}m, type=$izinType");
@@ -1543,6 +1763,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         _isIzinMode = false;
         _izinType = 'izin';
       });
+      await _refreshTodayStatus();
     }
 
     // Wajah valid + GPS sukses → tambah ke pool belajar.
@@ -1568,6 +1789,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
     WidgetsBinding.instance.removeObserver(this);
     _lightSubscription?.cancel();
     _onlineCheckTimer?.cancel();
+    _absenClockTimer?.cancel();
     _stopWarmup();
     if (!_sessionLogged && _currentSessionUuid != null) {
       _finishSession(finalStatus: 'cancelled');
@@ -1617,8 +1839,15 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
                     ),
                     const SizedBox(width: 8),
                     InkWell(
-                      onTap: _checkOnline,
-                      child: const Icon(Icons.refresh, color: AppColors.darkSlate),
+                      onTap: (_isCameraActive || _isLoading || _isProcessingGps)
+                          ? null
+                          : _toggleCamera,
+                      child: Icon(
+                        Icons.cameraswitch,
+                        color: (_isCameraActive || _isLoading || _isProcessingGps)
+                            ? AppColors.darkSlate.withValues(alpha: 0.3)
+                            : AppColors.darkSlate,
+                      ),
                     ),
                   ],
                 ),
@@ -1704,7 +1933,7 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
             child: ClipRRect(
               borderRadius: BorderRadius.circular(13),
               child: _isLoading
-                  ? const Center(child: CircularProgressIndicator(color: Colors.white))
+                  ? const Center(child: AppSpinner(size: 80, color: Colors.white))
                   : _isCameraReady
                       ? Stack(
                           fit: StackFit.expand,
@@ -1717,31 +1946,13 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
                                 child: CameraPreview(_controller!),
                               ),
                             ),
-                            Positioned(
-                              bottom: 16, left: 16, right: 16,
-                              child: Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: Colors.black54,
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  _statusMessage,
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    color: _statusColor,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ),
                           ],
                         )
                       : Center(
                           child: Padding(
                             padding: const EdgeInsets.all(16.0),
                             child: Text(
-                              enabled ? _statusMessage : _disabledReason,
+                              enabled ? _statusMessage : _cameraBoxText,
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                 color: _statusColor,
@@ -1756,6 +1967,26 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
         ),
       ),
     );
+  }
+
+  Color get _statusBg {
+    if (_statusColor == Colors.greenAccent) {
+      return AppColors.success.withValues(alpha: 0.15);
+    }
+    if (_statusColor == Colors.redAccent) {
+      return AppColors.error.withValues(alpha: 0.15);
+    }
+    if (_statusColor == Colors.orangeAccent) {
+      return AppColors.warning.withValues(alpha: 0.15);
+    }
+    return AppColors.creamDark;
+  }
+
+  Color get _statusTextColor {
+    if (_statusColor == Colors.greenAccent) return AppColors.success;
+    if (_statusColor == Colors.redAccent) return AppColors.error;
+    if (_statusColor == Colors.orangeAccent) return AppColors.warning;
+    return AppColors.darkSlate;
   }
 
   Widget _buildNormalRow() {
@@ -1791,15 +2022,18 @@ class _StreamScreenState extends State<StreamScreen> with WidgetsBindingObserver
             child: Container(
               height: itemHeight,
               alignment: Alignment.center,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
               decoration: BoxDecoration(
-                color: AppColors.creamDark,
+                color: _isCameraActive ? _statusBg : AppColors.creamDark,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
-                _isCameraActive ? _statusMessage : "Absen Tersedia",
+                _isCameraActive ? _statusMessage : _statusBottomText,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: AppColors.darkSlate,
+                style: TextStyle(
+                  color: _isCameraActive
+                      ? _statusTextColor
+                      : AppColors.darkSlate,
                   fontWeight: FontWeight.w500,
                 ),
               ),

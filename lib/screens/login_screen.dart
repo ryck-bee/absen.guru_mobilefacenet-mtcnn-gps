@@ -4,6 +4,7 @@ import '../config/app_colors.dart';
 import '../config/app_spacing.dart';
 import '../services/db/supabase_service.dart';
 import '../widgets/loading_overlay.dart';
+import '../widgets/app_spinner.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -220,7 +221,7 @@ class _LoginScreenState extends State<LoginScreen> {
           icon: Icon(
             _obscurePw ? Icons.visibility_off : Icons.visibility,
             color: AppColors.hurufSecondary,
-            size: 22,
+            size: 40,
           ),
           onPressed: () => setState(() => _obscurePw = !_obscurePw),
         ),
@@ -248,8 +249,8 @@ class _LoginScreenState extends State<LoginScreen> {
             SizedBox(
               width: 22,
               height: 22,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
+              child: AppSpinner(
+                size: 26,
                 color: AppColors.tealMedium,
               ),
             ),
@@ -327,8 +328,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   ? const SizedBox(
                       width: 20,
                       height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
+                      child: AppSpinner(
+                        size: 26,
                         color: Colors.white,
                       ),
                     )

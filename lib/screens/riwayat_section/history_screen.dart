@@ -6,6 +6,8 @@ import '../../services/db/database_service.dart';
 import '../../services/db/history_service.dart';
 import '../../services/db/sync_service.dart';
 import '../../services/model/history_entry.dart';
+import '../../widgets/app_spinner.dart';
+import '../../services/history_pull_service.dart';
 import 'history_calendar_screen.dart';
 
 final GlobalKey<HistoryScreenState> historyScreenKey =
@@ -98,9 +100,15 @@ class HistoryScreenState extends State<HistoryScreen> {
   Future<void> _refresh() async {
     setState(() => _loading = true);
     try {
+      // 1. Push dulu — biar data lokal baru sampai ke server.
       await SyncService().syncAll();
+
+      // 2. Pull — tarik dari server (attendance, session_logs, foto 7 terbaru).
+      if (_userId != null) {
+        await HistoryPullService().pullForUser(_userId!);
+      }
     } catch (e) {
-      debugPrint("HISTORY: sync error -> $e");
+      debugPrint("HISTORY: sync/pull error -> $e");
     }
     await _checkOnline();
     await _load();
@@ -214,7 +222,7 @@ class HistoryScreenState extends State<HistoryScreen> {
 
   Widget _buildBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: AppSpinner(size: 80));
     }
     if (_userId == null) {
       return const Center(
@@ -241,7 +249,7 @@ class HistoryScreenState extends State<HistoryScreen> {
     final gutter = AppSpacing.horizontal(context);
     return ListView.builder(
       controller: _scrollController,
-      padding: EdgeInsets.fromLTRB(gutter, 12, gutter, 96),
+      padding: EdgeInsets.fromLTRB(gutter, 12, gutter, 120),
       itemCount: _entries.length,
       itemBuilder: (ctx, i) {
         final entry = _entries[i];

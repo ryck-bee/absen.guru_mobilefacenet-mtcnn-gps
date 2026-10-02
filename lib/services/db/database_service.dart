@@ -1,10 +1,11 @@
 import 'dart:convert';
+import 'db_key_storage.dart';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
+import 'package:sqflite_sqlcipher/sqflite.dart';
 
 /// Service SQLite lokal untuk offline-first.
 class DatabaseService {
@@ -12,28 +13,45 @@ class DatabaseService {
   static final DatabaseService instance = DatabaseService._();
 
   Database? _db;
-  static const int _dbVersion = 10;
-  static const String _dbName = 'absensi_wajah.db';
+  String? _currentUserId;
+  static const int _dbVersion = 1; // fresh per-user DB
   static const _uuid = Uuid();
 
-  Future<void> init() async {
-    if (_db != null) return;
+  String? get currentUserId => _currentUserId;
+
+  /// Buka DB khusus user ini. Kalau sudah terbuka untuk user yang sama,
+  /// nggak ngapa-ngapain. Kalau beda user, tutup dulu baru buka.
+  Future<void> openFor(String userId) async {
+    if (_currentUserId == userId && _db != null) return;
+    if (_db != null) await close();
+
+    _currentUserId = userId;
+
+    // Ambil/generate kunci enkripsi user ini.
+    final key = await DbKeyStorage.getOrCreate(userId);
 
     final dbPath = await getDatabasesPath();
-    final fullPath = p.join(dbPath, _dbName);
+    final safeId = userId.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
+    final fullPath = p.join(dbPath, 'absensi_wajah_$safeId.db');
 
     _db = await openDatabase(
       fullPath,
+      password: key,
       version: _dbVersion,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
 
-    debugPrint("DB: SQLite initialized at $fullPath");
+    debugPrint("DB: SQLCipher opened for user=$userId at $fullPath");
   }
 
   Future<Database> get database async {
-    if (_db == null) await init();
+    if (_db == null) {
+      throw StateError(
+        "DatabaseService.database dipanggil tanpa openFor(userId). "
+        "Pastikan AuthRouter sudah panggil openFor sebelum akses DB.",
+      );
+    }
     return _db!;
   }
 
@@ -87,7 +105,7 @@ class DatabaseService {
     await db.execute('''
       CREATE TABLE attendance_local (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        client_uuid TEXT,
+        client_uuid TEXT UNIQUE,
         session_uuid TEXT,
         user_id TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
@@ -104,6 +122,9 @@ class DatabaseService {
         izin_type TEXT,
         photo_path TEXT,
         photo_url TEXT,
+        server_status TEXT,
+        reject_reason TEXT,
+        validated_at TEXT,
         sync_status TEXT NOT NULL DEFAULT 'pending',
         synced_at TEXT
       )
@@ -138,8 +159,12 @@ class DatabaseService {
         lux_value INTEGER,
         photo_url TEXT,
         sync_status TEXT NOT NULL DEFAULT 'pending',
-        synced_at TEXT
+        synced_at TEXT,
         time_status TEXT,
+        raw_photo_path TEXT,
+        raw_photo_url TEXT,
+        offline_duration_ms INTEGER,
+        battery_level INTEGER
       )
     ''');
 
@@ -193,14 +218,11 @@ class DatabaseService {
     ''');
 
     await db.execute('''
-      CREATE TABLE device_local (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        device_id TEXT,
-        android_id TEXT,
-        model TEXT,
-        brand TEXT,
-        android_version TEXT,
-        registered INTEGER NOT NULL DEFAULT 0
+      CREATE TABLE hari_libur_local (
+        id TEXT PRIMARY KEY,
+        tanggal TEXT NOT NULL,
+        keterangan TEXT,
+        sekolah_id TEXT
       )
     ''');
 
@@ -209,171 +231,14 @@ class DatabaseService {
     await db.execute('CREATE INDEX idx_session_logs_sync ON session_logs_local(sync_status)');
     await db.execute('CREATE INDEX idx_face_attempts_sync ON face_attempts_local(sync_status)');
     await db.execute('CREATE INDEX idx_gps_attempts_sync ON gps_attempts_local(sync_status)');
+    await db.execute('CREATE INDEX idx_libur_tanggal ON hari_libur_local(tanggal)');
 
     debugPrint("DB: Tables created (v$version)");
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    debugPrint("DB: Upgrade from v$oldVersion to v$newVersion");
-
-    if (oldVersion < 2) {
-      await db.execute('ALTER TABLE embeddings_local ADD COLUMN client_uuid TEXT');
-      await db.execute('ALTER TABLE attendance_local ADD COLUMN client_uuid TEXT');
-    }
-
-    if (oldVersion < 3) {
-      await db.execute('ALTER TABLE attendance_local ADD COLUMN session_uuid TEXT');
-      await db.execute('ALTER TABLE attendance_local ADD COLUMN photo_path TEXT');
-
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS session_logs_local (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          client_uuid TEXT UNIQUE,
-          user_id TEXT NOT NULL,
-          session_type TEXT NOT NULL,
-          started_at TEXT NOT NULL,
-          camera_ready_at TEXT,
-          first_face_at TEXT,
-          mtcnn_ms_first INTEGER,
-          mfn_ms_first INTEGER,
-          match_ms_first INTEGER,
-          mtcnn_ms_final INTEGER,
-          mfn_ms_final INTEGER,
-          match_ms_final INTEGER,
-          face_valid_at TEXT,
-          failed_count INTEGER NOT NULL DEFAULT 0,
-          gps_start_at TEXT,
-          gps_done_at TEXT,
-          gps_result TEXT,
-          gps_ms INTEGER,
-          final_status TEXT NOT NULL,
-          final_at TEXT NOT NULL,
-          photo_path TEXT,
-          sync_status TEXT NOT NULL DEFAULT 'pending',
-          synced_at TEXT
-        )
-      ''');
-
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS face_attempts_local (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          client_uuid TEXT UNIQUE,
-          session_uuid TEXT NOT NULL,
-          user_id TEXT NOT NULL,
-          attempt_number INTEGER NOT NULL,
-          attempted_at TEXT NOT NULL,
-          mtcnn_status TEXT NOT NULL,
-          mtcnn_ms INTEGER,
-          mfn_status TEXT,
-          mfn_ms INTEGER,
-          match_distance REAL,
-          sync_status TEXT NOT NULL DEFAULT 'pending',
-          synced_at TEXT
-        )
-      ''');
-
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS gps_attempts_local (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          client_uuid TEXT UNIQUE,
-          session_uuid TEXT NOT NULL,
-          user_id TEXT NOT NULL,
-          attempt_number INTEGER NOT NULL,
-          started_at TEXT NOT NULL,
-          done_at TEXT,
-          result TEXT NOT NULL,
-          lat REAL,
-          lng REAL,
-          accuracy_meters REAL,
-          distance_to_school REAL,
-          duration_ms INTEGER,
-          sync_status TEXT NOT NULL DEFAULT 'pending',
-          synced_at TEXT
-        )
-      ''');
-    }
-
-    if (oldVersion < 4) {
-      await db.execute('ALTER TABLE session_logs_local ADD COLUMN device_uptime_ms INTEGER');
-      await db.execute('ALTER TABLE session_logs_local ADD COLUMN device_boot_time_ms INTEGER');
-
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS trusted_time_anchor_local (
-          user_id TEXT PRIMARY KEY,
-          server_time_at_sync TEXT NOT NULL,
-          system_time_at_sync TEXT NOT NULL,
-          uptime_at_sync_ms INTEGER NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-      ''');
-    }
-
-    if (oldVersion < 5) {
-      await db.execute('ALTER TABLE session_logs_local ADD COLUMN lux_value INTEGER');
-      await db.execute('ALTER TABLE face_attempts_local ADD COLUMN lux_value INTEGER');
-    }
-
-    if (oldVersion < 6) {
-      await db.execute('ALTER TABLE session_logs_local ADD COLUMN photo_url TEXT');
-      await db.execute('ALTER TABLE attendance_local ADD COLUMN photo_url TEXT');
-    }
-
-    if (oldVersion < 7) {
-      await db.execute('ALTER TABLE attendance_local ADD COLUMN is_izin INTEGER NOT NULL DEFAULT 0');
-      await db.execute('ALTER TABLE attendance_local ADD COLUMN izin_type TEXT');
-      await db.execute('ALTER TABLE attendance_local ADD COLUMN recorded_date TEXT');
-    }
-
-    if (oldVersion < 8) {
-      await db.execute("ALTER TABLE embeddings_local ADD COLUMN source TEXT NOT NULL DEFAULT 'registration'");
-    }
-
-    if (oldVersion < 9) {
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS device_local (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          device_id TEXT,
-          android_id TEXT,
-          model TEXT,
-          brand TEXT,
-          android_version TEXT,
-          registered INTEGER NOT NULL DEFAULT 0
-        )
-      ''');
-    }
-
-    if (oldVersion < 10) {
-      await db.execute('ALTER TABLE session_logs_local ADD COLUMN time_status TEXT');
-    }
-  }
-
-  // ============================================================
-  // DEVICE LOCAL
-  // ============================================================
-  Future<Map<String, dynamic>?> getDeviceLocal() async {
-    final db = await database;
-    final rows = await db.query('device_local', where: 'id = 1', limit: 1);
-    return rows.isEmpty ? null : rows.first;
-  }
-
-  Future<void> saveDeviceLocal({
-    required String? deviceId,
-    required String androidId,
-    required String model,
-    required String brand,
-    required String androidVersion,
-    required bool registered,
-  }) async {
-    final db = await database;
-    await db.insert('device_local', {
-      'id': 1,
-      'device_id': deviceId,
-      'android_id': androidId,
-      'model': model,
-      'brand': brand,
-      'android_version': androidVersion,
-      'registered': registered ? 1 : 0,
-    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    // Fresh per-user DB mulai dari v1. Kalau nanti upgrade, tambah di sini.
+    debugPrint("DB: Upgrade v$oldVersion -> v$newVersion (per-user)");
   }
 
   // ============================================================
@@ -433,6 +298,48 @@ class DatabaseService {
     final db = await database;
     final rows = await db.query('sekolah_local', limit: 1);
     return rows.isEmpty ? null : rows.first;
+  }
+
+  // ============================================================
+  // HARI LIBUR
+  // ============================================================
+  Future<void> saveHariLiburBulk(List<Map<String, dynamic>> rows) async {
+    final db = await database;
+    final batch = db.batch();
+    for (final row in rows) {
+      batch.insert(
+        'hari_libur_local',
+        {
+          'id': row['id'],
+          'tanggal': row['tanggal'],
+          'keterangan': row['keterangan'],
+          'sekolah_id': row['sekolah_id'],
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    await batch.commit(noResult: true);
+    debugPrint("DB: saveHariLiburBulk -> ${rows.length} rows");
+  }
+
+  Future<void> clearHariLibur() async {
+    final db = await database;
+    await db.delete('hari_libur_local');
+  }
+
+  Future<Set<String>> getHariLiburSet() async {
+    final db = await database;
+    final rows = await db.query('hari_libur_local', columns: ['tanggal']);
+    return rows.map((r) => r['tanggal'] as String).toSet();
+  }
+
+  Future<String?> getMaxTanggalLibur() async {
+    final db = await database;
+    final r = await db.rawQuery(
+      'SELECT MAX(tanggal) as max_t FROM hari_libur_local',
+    );
+    final v = r.first['max_t'];
+    return v as String?;
   }
 
   // ============================================================
@@ -581,8 +488,11 @@ class DatabaseService {
     required String finalStatus,
     required DateTime finalAt,
     String? photoPath,
+    String? rawPhotoPath,
     int? deviceUptimeMs,
     int? deviceBootTimeMs,
+    int? offlineDurationMs,
+    int? batteryLevel,
     int? luxValue,
     String? timeStatus,
   }) async {
@@ -609,8 +519,11 @@ class DatabaseService {
       'final_status': finalStatus,
       'final_at': finalAt.toIso8601String(),
       'photo_path': photoPath,
+      'raw_photo_path': rawPhotoPath,
       'device_uptime_ms': deviceUptimeMs,
       'device_boot_time_ms': deviceBootTimeMs,
+      'offline_duration_ms': offlineDurationMs,
+      'battery_level': batteryLevel,
       'lux_value': luxValue,
       'sync_status': 'pending',
       'time_status': timeStatus,
@@ -623,13 +536,14 @@ class DatabaseService {
         where: 'sync_status = ?', whereArgs: ['pending'], orderBy: 'started_at ASC');
   }
 
-  Future<void> markSessionLogSynced(int id, {String? photoUrl}) async {
+  Future<void> markSessionLogSynced(int id, {String? photoUrl, String? rawPhotoUrl}) async {
     final db = await database;
     final values = <String, dynamic>{
       'sync_status': 'synced',
       'synced_at': DateTime.now().toIso8601String(),
     };
     if (photoUrl != null) values['photo_url'] = photoUrl;
+    if (rawPhotoUrl != null) values['raw_photo_url'] = rawPhotoUrl;
     await db.update('session_logs_local', values,
         where: 'id = ?', whereArgs: [id]);
   }
@@ -804,6 +718,77 @@ class DatabaseService {
         where: 'id = ?', whereArgs: [id]);
   }
 
+  Future<void> updateAttendancePhotoPath(String clientUuid, String photoPath) async {
+    final db = await database;
+    await db.update(
+      'attendance_local',
+      {'photo_path': photoPath},
+      where: 'client_uuid = ?',
+      whereArgs: [clientUuid],
+    );
+  }
+
+  /// True kalau user ini belum punya row apapun. Buat deteksi device baru.
+  Future<bool> isUserDataEmpty() async {
+    final db = await database;
+    final r = await db.rawQuery('SELECT COUNT(*) as c FROM attendance_local');
+    return (Sqflite.firstIntValue(r) ?? 0) == 0;
+  }
+
+  /// Insert attendance hasil pull dari server.
+  /// Skip kalau client_uuid sudah ada.
+  Future<void> insertAttendanceFromServer(Map<String, dynamic> row) async {
+    final db = await database;
+    await db.insert(
+      'attendance_local',
+      {
+        'client_uuid': row['client_uuid'],
+        'session_uuid': row['session_uuid'],
+        'user_id': row['user_id'],
+        'recorded_at': row['recorded_at'],
+        'recorded_date': row['recorded_date'],
+        'local_timestamp': row['local_timestamp'],
+        'lat': row['lat'],
+        'lng': row['lng'],
+        'distance_meters': row['distance_meters'],
+        'match_distance': row['match_distance'],
+        'match_mode': row['match_mode'],
+        'connectivity_mode': row['connectivity_mode'],
+        'is_late': (row['is_late'] == true) ? 1 : 0,
+        'is_izin': (row['is_izin'] == true) ? 1 : 0,
+        'izin_type': row['izin_type'],
+        'photo_path': null,
+        'photo_url': row['photo_url'],
+        'server_status': row['status'],
+        'reject_reason': row['reject_reason'],
+        'validated_at': row['validated_at'],
+        'sync_status': 'synced',
+        'synced_at': DateTime.now().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+  }
+
+  /// Update status dari server (kalau device ini pernah push, lalu server validasi).
+  Future<void> updateAttendanceServerStatus(
+    String clientUuid, {
+    required String status,
+    String? rejectReason,
+    String? validatedAt,
+  }) async {
+    final db = await database;
+    await db.update(
+      'attendance_local',
+      {
+        'server_status': status,
+        'reject_reason': rejectReason,
+        'validated_at': validatedAt,
+      },
+      where: 'client_uuid = ?',
+      whereArgs: [clientUuid],
+    );
+  }
+
   Future<int> countAttendance() async {
     final db = await database;
     final r = await db.rawQuery('SELECT COUNT(*) as c FROM attendance_local');
@@ -893,53 +878,9 @@ class DatabaseService {
     return totalDeleted;
   }
 
-  Future<int> cleanupOldSyncedPhotos() async {
-    final db = await database;
-    final cutoff = DateTime.now().subtract(const Duration(days: 30)).toIso8601String();
-    int deleted = 0;
-
-    final rows = await db.query('attendance_local',
-        where: "sync_status = 'synced' AND photo_path IS NOT NULL AND recorded_at < ?",
-        whereArgs: [cutoff]);
-    for (final row in rows) {
-      final path = row['photo_path'] as String?;
-      if (path != null) {
-        try {
-          final f = File(path);
-          if (await f.exists()) await f.delete();
-          deleted++;
-        } catch (_) {}
-      }
-      await db.update('attendance_local',
-          {'photo_path': null}, where: 'id = ?', whereArgs: [row['id']]);
-    }
-
-    final sessions = await db.query('session_logs_local',
-        where: "sync_status = 'synced' AND photo_path IS NOT NULL AND started_at < ?",
-        whereArgs: [cutoff]);
-    for (final row in sessions) {
-      final path = row['photo_path'] as String?;
-      if (path != null) {
-        try {
-          final f = File(path);
-          if (await f.exists()) await f.delete();
-          deleted++;
-        } catch (_) {}
-      }
-      await db.update('session_logs_local',
-          {'photo_path': null}, where: 'id = ?', whereArgs: [row['id']]);
-    }
-
-    if (deleted > 0) {
-      debugPrint("DB: cleanupOldSyncedPhotos -> $deleted photos deleted");
-    }
-    return deleted;
-  }
-
-  // ============================================================
-  // UTILITY
-  // ============================================================
-  Future<void> clearAll() async {
+  /// Reset semua data user saat ini. TIDAK dipanggil saat logout.
+  /// Hanya untuk fitur "reset data" manual di menu pengaturan (kalau ada).
+  Future<void> resetCurrentUserData() async {
     final db = await database;
     await db.delete('users_local');
     await db.delete('sekolah_local');
@@ -949,8 +890,7 @@ class DatabaseService {
     await db.delete('face_attempts_local');
     await db.delete('gps_attempts_local');
     await db.delete('trusted_time_anchor_local');
-    // device_local TIDAK dihapus — device tetap terdaftar di HP ini
-    debugPrint("DB: All tables cleared (device_local kept)");
+    debugPrint("DB: resetCurrentUserData selesai");
   }
 
   Future<void> close() async {

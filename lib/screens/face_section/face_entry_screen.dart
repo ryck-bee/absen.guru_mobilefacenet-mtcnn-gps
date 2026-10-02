@@ -15,6 +15,7 @@ import '../../services/model/mobilefacenet_service.dart';
 import '../../services/model/mtcnn_service.dart';
 import '../../utils/camera_image_utils.dart';
 import '../../widgets/loading_overlay.dart';
+import '../../widgets/app_spinner.dart';
 
 enum _CaptureStatus { none, success, failed }
 
@@ -781,8 +782,8 @@ class _FaceEntryScreenState extends State<FaceEntryScreen> {
                 ? const SizedBox(
                     width: 20,
                     height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
+                    child: AppSpinner(
+                      size: 26,
                       color: AppColors.tealMedium,
                     ),
                   )

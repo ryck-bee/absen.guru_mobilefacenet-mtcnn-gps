@@ -117,7 +117,7 @@ class _ProfilScreenState extends State<ProfilScreen> {
     if (confirm != true) return;
     loadingController.show();
     await SupabaseService().signOut();
-    await DatabaseService.instance.clearAll();
+    await DatabaseService.instance.close();
     MobileFaceNetService().clearAllUsers();
   }
 

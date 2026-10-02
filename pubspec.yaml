@@ -51,6 +51,11 @@ dependencies:
   http: ^1.6.0
   permission_handler: ^11.3.1
   device_info_plus: ^13.2.0
+  material3_expressive_loading_indicator: ^0.1.0
+  battery_plus: ^6.0.0
+  flutter_secure_storage: ^11.2.0
+  timezone: ^0.11.1
+  sqflite_sqlcipher: ^3.1.0
 
 dev_dependencies:
   flutter_test:
@@ -80,10 +85,6 @@ flutter:
       - assets/models/pnet.tflite
       - assets/models/rnet.tflite
       - assets/models/onet.tflite
-      - assets/benchmark/sample1.jpg
-      - assets/benchmark/sample2.jpg
-      - assets/benchmark/sample3.jpg
-      - assets/benchmark/neg1.jpg
 
   fonts:
     - family: Quicksand

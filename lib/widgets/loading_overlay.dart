@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../config/app_colors.dart';
+import '../widgets/app_spinner.dart';
 
 final ValueNotifier<bool> loadingNotifier = ValueNotifier<bool>(false);
 
@@ -49,7 +50,7 @@ class LoadingOverlay extends StatelessWidget {
                 child: Container(
                   color: AppColors.cream,
                   child: const Center(
-                    child: CircularProgressIndicator(
+                    child: AppSpinner(
                       color: AppColors.tealMedium,
                     ),
                   ),

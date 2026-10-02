@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'absen_section/stream_screen.dart';
 import 'profile_section/profil_screen.dart';
-import 'profile_section/test_screen.dart';
 import '../config/app_colors.dart';
 import '../config/app_spacing.dart';
 import '../services/db/database_service.dart';
@@ -68,19 +67,9 @@ class _MainScreenState extends State<MainScreen> {
     });
   }
 
-  void _openTest() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => TestScreen(cameras: widget.cameras),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final showCalendarFab = _currentIndex == 2;
-    final showTestFab = _currentIndex == 0;
 
     return Scaffold(
       backgroundColor: AppColors.cream,
@@ -127,35 +116,6 @@ class _MainScreenState extends State<MainScreen> {
                       (historyScreenKey.currentState?.showCalendar ?? false)
                           ? Icons.chevron_left
                           : Icons.calendar_month,
-                      color: Colors.white,
-                      size: AppSpacing.fabIconSize(context),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          // FAB test — KIRI (tab pengaturan)
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeInOut,
-            left: showTestFab ? AppSpacing.horizontal(context) : -100,
-            bottom: MediaQuery.of(context).padding.bottom + 13,
-            child: IgnorePointer(
-              ignoring: !showTestFab,
-              child: Material(
-                color: AppColors.maroon,
-                shape: const CircleBorder(),
-                elevation: 4,
-                child: InkWell(
-                  onTap: _openTest,
-                  customBorder: const CircleBorder(),
-                  child: SizedBox(
-                    width: AppSpacing.fabSize(context),
-                    height: AppSpacing.fabSize(context),
-                    child: Icon(
-                      Icons.code,
                       color: Colors.white,
                       size: AppSpacing.fabIconSize(context),
                     ),

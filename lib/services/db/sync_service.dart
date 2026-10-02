@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'database_service.dart';
+import '../photo_retention_service.dart';
+import '../device_storage.dart';
 import '../monotonic_clock.dart';
 import '../../main.dart';
 
@@ -78,13 +80,13 @@ class SyncService {
     // Sudah ada di global? Skip.
     if (gDeviceId.isNotEmpty) return;
 
-    // Cek lokal
-    final local = await DatabaseService.instance.getDeviceLocal();
+    // Cek secure storage
+    final local = await DeviceStorage.get();
     if (local != null && (local['registered'] as int? ?? 0) == 1) {
       final id = local['device_id'] as String?;
       if (id != null && id.isNotEmpty) {
         gDeviceId = id;
-        debugPrint("DEVICE: loaded from local, id=$gDeviceId");
+        debugPrint("DEVICE: loaded from secure storage, id=$gDeviceId");
         return;
       }
     }
@@ -119,7 +121,7 @@ class SyncService {
 
       gDeviceId = row['id'] as String;
 
-      await DatabaseService.instance.saveDeviceLocal(
+      await DeviceStorage.save(
         deviceId: gDeviceId,
         androidId: gAndroidId,
         model: gDeviceModel,
@@ -131,8 +133,7 @@ class SyncService {
       debugPrint("DEVICE: registered, id=$gDeviceId");
     } catch (e) {
       debugPrint("DEVICE: register error -> $e");
-      // Simpan info tanpa device_id, biar bisa retry lain waktu
-      await DatabaseService.instance.saveDeviceLocal(
+      await DeviceStorage.save(
         deviceId: null,
         androidId: gAndroidId,
         model: gDeviceModel,
@@ -141,6 +142,55 @@ class SyncService {
         registered: false,
       );
     }
+  }
+
+  /// Tarik hari libur dari Supabase.
+  /// Filter: dari hari ini sampai (tahun depan) 31 Desember.
+  /// Skip kalau lokal sudah punya data sampai minimal 30 hari sebelum end.
+  Future<void> _syncHariLibur() async {
+    try {
+      final now = DateTime.now();
+      final endDate = DateTime(now.year + 1, 12, 31);
+      final threshold = endDate.subtract(const Duration(days: 30));
+
+      final maxLocal = await DatabaseService.instance.getMaxTanggalLibur();
+      if (maxLocal != null) {
+        final maxDate = DateTime.tryParse(maxLocal);
+        if (maxDate != null && maxDate.isAfter(threshold)) {
+          debugPrint("SYNC: libur lokal cukup (max=$maxLocal), skip");
+          return;
+        }
+      }
+
+      final startStr = _dateOnly(now);
+      final endStr = _dateOnly(endDate);
+
+      final rows = await _client
+          .from('hari_libur')
+          .select()
+          .gte('tanggal', startStr)
+          .lte('tanggal', endStr)
+          .timeout(const Duration(seconds: 5));
+
+      if (rows.isEmpty) {
+        debugPrint("SYNC: 0 hari libur di server");
+        return;
+      }
+
+      await DatabaseService.instance.clearHariLibur();
+      await DatabaseService.instance.saveHariLiburBulk(
+        rows.map((r) => Map<String, dynamic>.from(r as Map)).toList(),
+      );
+      debugPrint("SYNC: ${rows.length} hari libur ditarik");
+    } catch (e) {
+      debugPrint("SYNC: tarik hari libur gagal -> $e");
+    }
+  }
+
+  String _dateOnly(DateTime d) {
+    return '${d.year.toString().padLeft(4, '0')}-'
+        '${d.month.toString().padLeft(2, '0')}-'
+        '${d.day.toString().padLeft(2, '0')}';
   }
 
   /// Sync semua pending data ke Supabase.
@@ -168,8 +218,11 @@ class SyncService {
     int photoOk = 0, photoFail = 0;
 
     try {
-      // === 0. DEVICE REGISTRATION ===
+      // === 0a. DEVICE REGISTRATION ===
       await _ensureDeviceRegistered(userId);
+
+      // === 0b. HARI LIBUR ===
+      await _syncHariLibur();
 
       // === 1. EMBEDDINGS ===
       final pendingEmb = await DatabaseService.instance.getPendingEmbeddings();
@@ -188,7 +241,9 @@ class SyncService {
       debugPrint("SYNC: ${pendingSession.length} session log pending");
       for (final row in pendingSession) {
         String? photoUrl = row['photo_url'] as String?;
+        String? rawPhotoUrl = row['raw_photo_url'] as String?;
         final photoPath = row['photo_path'] as String?;
+        final rawPhotoPath = row['raw_photo_path'] as String?;
         final sessionUuid = row['client_uuid'] as String?;
 
         if (photoPath != null && sessionUuid != null && photoUrl == null) {
@@ -201,10 +256,21 @@ class SyncService {
           }
         }
 
-        if (await _uploadSessionLog(row, photoUrl)) {
+        if (rawPhotoPath != null && sessionUuid != null && rawPhotoUrl == null) {
+          final uploaded = await _uploadPhoto(rawPhotoPath, userId, sessionUuid, 'raw');
+          if (uploaded != null) {
+            rawPhotoUrl = uploaded;
+            photoOk++;
+          } else {
+            photoFail++;
+          }
+        }
+
+        if (await _uploadSessionLog(row, photoUrl, rawPhotoUrl)) {
           await DatabaseService.instance.markSessionLogSynced(
             row['id'] as int,
             photoUrl: photoUrl,
+            rawPhotoUrl: rawPhotoUrl,
           );
           slOk++;
         } else {
@@ -268,6 +334,11 @@ class SyncService {
       // === 6. UPDATE ANCHOR ===
       await _updateAnchor(userId);
 
+      // === 7. RETENSI FOTO ===
+      // Cuma kalau sync nggak ada error (biar nggak hapus foto pending).
+      await PhotoRetentionService().enforce(userId);
+      await PhotoRetentionService().cleanupNonAttendanceFiles(userId);
+
     } catch (e) {
       debugPrint("SYNC ERROR: $e");
     } finally {
@@ -322,7 +393,7 @@ class SyncService {
     }
   }
 
-  Future<bool> _uploadSessionLog(Map<String, dynamic> row, String? photoUrl) async {
+  Future<bool> _uploadSessionLog(Map<String, dynamic> row, String? photoUrl, String? rawPhotoUrl) async {
     final clientUuid = row['client_uuid'] as String?;
     if (clientUuid == null) return true;
 
@@ -349,11 +420,14 @@ class SyncService {
         'final_status': row['final_status'],
         'final_at': row['final_at'],
         'photo_url': photoUrl,
+        'raw_photo_url': rawPhotoUrl,
         'device_uptime_ms': row['device_uptime_ms'],
         'device_boot_time_ms': row['device_boot_time_ms'],
         'lux_value': row['lux_value'],
-        'device_id': _deviceIdOrNull,
+        'offline_duration_ms': row['offline_duration_ms'],
+        'battery_level': row['battery_level'],
         'time_status': row['time_status'],
+        'device_id': _deviceIdOrNull,
       });
       return true;
     } on PostgrestException catch (e) {

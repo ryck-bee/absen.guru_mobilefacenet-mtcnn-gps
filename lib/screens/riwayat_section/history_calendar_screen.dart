@@ -3,6 +3,8 @@ import '../../config/app_colors.dart';
 import '../../config/app_spacing.dart';
 import '../../services/db/history_service.dart';
 import '../../services/model/history_entry.dart';
+import '../../services/db/database_service.dart';
+import '../../widgets/app_spinner.dart';
 
 /// Kalender bulanan riwayat absen.
 ///
@@ -28,6 +30,7 @@ class _HistoryCalendarViewState extends State<HistoryCalendarView> {
   late DateTime _month;
 
   Map<String, HistoryStatus> _statusByDate = {};
+  Set<String> _hariLiburSet = {};
   bool _loading = true;
 
   static const List<String> _dayLabels = [
@@ -42,6 +45,12 @@ class _HistoryCalendarViewState extends State<HistoryCalendarView> {
   }
 
   Future<void> _loadMonth() async {
+    // Load hari libur (sekali saja, cache kalau sudah ada).
+    if (_hariLiburSet.isEmpty) {
+      try {
+        _hariLiburSet = await DatabaseService.instance.getHariLiburSet();
+      } catch (_) {}
+    }
     setState(() => _loading = true);
     try {
       final entries = await HistoryService().loadMonth(
@@ -93,7 +102,7 @@ class _HistoryCalendarViewState extends State<HistoryCalendarView> {
     final gutter = AppSpacing.horizontal(context);
 
     return Padding(
-      padding: EdgeInsets.fromLTRB(gutter, 8, gutter, 96),
+      padding: EdgeInsets.fromLTRB(gutter, 8, gutter, 120),
       child: Column(
         children: [
           _buildMonthHeader(),
@@ -102,7 +111,7 @@ class _HistoryCalendarViewState extends State<HistoryCalendarView> {
           const SizedBox(height: 4),
           Expanded(
             child: _loading
-                ? const Center(child: CircularProgressIndicator())
+                ? const Center(child: AppSpinner())
                 : _buildGrid(),
           ),
         ],
@@ -196,6 +205,9 @@ class _HistoryCalendarViewState extends State<HistoryCalendarView> {
     final key = _dateKey(date);
     final status = _statusByDate[key];
     final today = _isToday(date);
+    final isSunday = date.weekday == DateTime.sunday;
+    final isHoliday = _hariLiburSet.contains(key);
+    final isRedDay = isSunday || isHoliday;
 
     final fillColor = status == null ? null : _statusColor(status);
     final hasData = status != null;
@@ -216,7 +228,9 @@ class _HistoryCalendarViewState extends State<HistoryCalendarView> {
             style: TextStyle(
               fontSize: fontSize,
               fontWeight: FontWeight.w700,
-              color: AppColors.darkSlate,
+              color: isRedDay
+                  ? AppColors.redAlpa
+                  : AppColors.darkSlate,
             ),
           ),
         ),

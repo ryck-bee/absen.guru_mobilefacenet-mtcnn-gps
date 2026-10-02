@@ -117,14 +117,43 @@ class MTCNNService {
       oNetThreshold = GlassesConfig.looseONetThreshold;
     }
 
-    final pnetBoxes = _runPNet(inputImage);
-    if (pnetBoxes.isEmpty) return [];
+    // Cascading batches:
+    //   batch 1: [1.0, 0.5, 0.25]  — wajah kecil/normal
+    //   batch 2: [0.125]           — wajah agak besar
+    //   batch 3: [0.0625]          — wajah besar
+    //   batch 4: [0.03125]         — wajah sangat besar
+    const batches = <List<double>>[
+      [1.0, 0.5, 0.25],
+      [0.125],
+      [0.0625],
+      [0.03125],
+    ];
 
-    final rnetBoxes = _runRNet(inputImage, pnetBoxes, threshold: rNetThreshold);
-    if (rnetBoxes.isEmpty) return [];
+    for (int bi = 0; bi < batches.length; bi++) {
+      final batch = batches[bi];
+      final pnetBoxes = _runPNetScales(inputImage, batch);
+      if (pnetBoxes.isEmpty) {
+        debugPrint("MTCNN: batch #${bi + 1} (${batch.join(",")}) P-Net kosong");
+        continue;
+      }
 
-    final onetFaces = _runONet(inputImage, rnetBoxes, threshold: oNetThreshold);
-    return onetFaces;
+      final rnetBoxes = _runRNet(inputImage, pnetBoxes, threshold: rNetThreshold);
+      if (rnetBoxes.isEmpty) {
+        debugPrint("MTCNN: batch #${bi + 1} (${batch.join(",")}) R-Net kosong");
+        continue;
+      }
+
+      final onetFaces = _runONet(inputImage, rnetBoxes, threshold: oNetThreshold);
+      if (onetFaces.isNotEmpty) {
+        debugPrint("MTCNN: batch #${bi + 1} (${batch.join(",")}) → ${onetFaces.length} wajah");
+        return onetFaces;
+      }
+
+      debugPrint("MTCNN: batch #${bi + 1} (${batch.join(",")}) O-Net kosong");
+    }
+
+    debugPrint("MTCNN: semua batch gagal");
+    return [];
   }
 
   // ============================================================
@@ -205,7 +234,7 @@ class MTCNNService {
   // ============================================================
   // PIPELINE INTERNAL (tidak berubah dari versi sebelumnya)
   // ============================================================
-  List<_RawBox> _runPNet(img.Image image, {double threshold = 0.6}) {
+  List<_RawBox> _runPNetScales(img.Image image, List<double> scales) {
     final int side = min(image.width, image.height);
     final int cx = image.width ~/ 2;
     final int cy = image.height ~/ 2;
@@ -232,9 +261,6 @@ class MTCNNService {
     final outBboxShape = _pnet!.getOutputTensor(idxBbox).shape;
     final int oh = outClassShape[1];
     final int ow = outClassShape[2];
-
-    //scale sementara work midrange 4 scale, jika hp low end jalan maka kita fix
-    final scales = [1.0, 0.5, 0.25, 0.125];
 
     final candidates = <_RawBox>[];
 
@@ -270,7 +296,7 @@ class MTCNNService {
           if (y * 2 + 12 > sh) continue;
 
           final double prob = (outClass[0][y][x][1] as num).toDouble();
-          if (prob > threshold) {
+          if (prob > 0.6) {
             final double r0 = (outBbox[0][y][x][0] as num).toDouble();
             final double r1 = (outBbox[0][y][x][1] as num).toDouble();
             final double r2 = (outBbox[0][y][x][2] as num).toDouble();

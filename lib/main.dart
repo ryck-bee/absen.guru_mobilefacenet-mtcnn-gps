@@ -10,11 +10,16 @@ import 'screens/login_screen.dart';
 import 'screens/face_section/face_entry_screen.dart';
 import 'services/model/mobilefacenet_service.dart';
 import 'services/db/supabase_service.dart';
+import 'services/db/sync_service.dart';
 import 'services/debug_logger.dart';
+import 'services/device_storage.dart';
+import 'services/history_pull_service.dart';
 import 'config/supabase_config.dart';
 import 'config/app_colors.dart';
+import 'services/notif_service.dart';
 import 'services/db/database_service.dart';
 import 'widgets/loading_overlay.dart';
+import 'widgets/app_spinner.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -31,6 +36,8 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await DebugLogger.instance.init();
+
+  await NotifService.instance.init();
 
   final originalDebugPrint = debugPrint;
   debugPrint = (String? message, {int? wrapWidth}) {
@@ -68,24 +75,19 @@ Future<void> main() async {
     debugPrint("SUPABASE ERROR: $e");
   }
 
-  try {
-    await DatabaseService.instance.init();
-    debugPrint("DB: Initialized");
-  } catch (e) {
-    debugPrint("DB ERROR: $e");
-  }
+  // DB lokal TIDAK di-init di sini. DB dibuka per-user
+  // setelah AuthRouter tau siapa yang login (lihat AuthRouter._bootstrap).
 
   // Fallback: kalau androidId null (custom OS / AOSP), pakai UUID lokal.
-    try {
+  try {
     if (gAndroidId.isEmpty) {
-      final existing = await DatabaseService.instance.getDeviceLocal();
-      final savedId = existing?['android_id'] as String?;
+      final savedId = await DeviceStorage.getAndroidId();
       if (savedId != null && savedId.isNotEmpty) {
         gAndroidId = savedId;
-        debugPrint("DEVICE: fallback androidId dari lokal = $gAndroidId");
+        debugPrint("DEVICE: fallback androidId dari secure storage = $gAndroidId");
       } else {
         gAndroidId = const Uuid().v4();
-        await DatabaseService.instance.saveDeviceLocal(
+        await DeviceStorage.save(
           deviceId: null,
           androidId: gAndroidId,
           model: gDeviceModel,
@@ -280,6 +282,24 @@ class _AuthRouterState extends State<AuthRouter> {
 
   Future<void> _bootstrap() async {
     try {
+      final authUser = Supabase.instance.client.auth.currentUser;
+      if (authUser == null) {
+        if (mounted) {
+          setState(() {
+            _stage = _AuthStage.error;
+            _errorMsg = 'Sesi login tidak ditemukan. Coba login ulang.';
+          });
+          await loadingController.hide();
+        }
+        return;
+      }
+
+      final userId = authUser.id;
+
+      // 1. Buka DB khusus user ini.
+      await DatabaseService.instance.openFor(userId);
+
+      // 2. Pastikan user lokal ada. Kalau belum (device baru), fetch dari server.
       var user = await DatabaseService.instance.getUser();
 
       if (user == null) {
@@ -314,11 +334,29 @@ class _AuthRouterState extends State<AuthRouter> {
         user = await DatabaseService.instance.getUser();
       }
 
+      // 3. Auto-pull kalau device baru (DB user ini kosong).
+      try {
+        final isEmpty = await DatabaseService.instance.isUserDataEmpty();
+        if (isEmpty) {
+          final online = await SyncService().isServerReachable(useCache: false);
+          if (online) {
+            debugPrint("AUTH ROUTER: device baru, pull riwayat dari server...");
+            await HistoryPullService().pullForUser(userId);
+          } else {
+            debugPrint("AUTH ROUTER: DB kosong tapi offline, skip pull");
+          }
+        }
+      } catch (e) {
+        debugPrint("AUTH ROUTER: auto-pull error -> $e");
+      }
+
+      // Refresh notif pengingat absen.
+      NotifService.instance.refreshForUser(userId).catchError((_) {});
+
+      // 4. Load embedding ke memory dari DB user ini.
       await MobileFaceNetService().loadFromDatabase();
 
-      final userId = user?['user_id'] as String?;
-      final hasFace =
-          userId != null && MobileFaceNetService().hasUser(userId);
+      final hasFace = MobileFaceNetService().hasUser(userId);
 
       if (!mounted) return;
       setState(() {
@@ -350,7 +388,7 @@ class _AuthRouterState extends State<AuthRouter> {
 
   Future<void> _logout() async {
     await SupabaseService().signOut();
-    await DatabaseService.instance.clearAll();
+    await DatabaseService.instance.close();
     MobileFaceNetService().clearAllUsers();
   }
 
@@ -368,7 +406,7 @@ class _AuthRouterState extends State<AuthRouter> {
       case _AuthStage.loading:
         return const Scaffold(
           backgroundColor: AppColors.cream,
-          body: Center(child: CircularProgressIndicator()),
+          body: Center(child: AppSpinner()),
         );
 
       case _AuthStage.error:

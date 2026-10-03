@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 class MonotonicClock {
   MonotonicClock._();
   static const _channel =
-      MethodChannel('com.example.absensi_wajah/monotonic_clock');
+      MethodChannel('id.ac.umj.rikoputra.absensiwajah/monotonic_clock');
 
   static Future<int?> elapsedRealtimeMs() async {
     try {

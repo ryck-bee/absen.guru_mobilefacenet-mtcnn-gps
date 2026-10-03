@@ -1,4 +1,4 @@
-package com.example.absensi_wajah
+package id.ac.umj.rikoputra.absensiwajah
 
 import android.content.Context
 import android.location.LocationManager
@@ -20,7 +20,7 @@ class MockLocationPlugin(
 ) : MethodChannel.MethodCallHandler {
 
     companion object {
-        const val CHANNEL = "com.example.absensi_wajah/mock_location"
+        const val CHANNEL = "id.ac.umj.rikoputra.absensiwajah/mock_location"
     }
 
     private val channel = MethodChannel(messenger, CHANNEL).apply {

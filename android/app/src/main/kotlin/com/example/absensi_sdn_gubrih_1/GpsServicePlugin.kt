@@ -1,4 +1,4 @@
-package com.example.absensi_wajah
+package id.ac.umj.rikoputra.absensiwajah
 
 import android.Manifest
 import android.app.Activity
@@ -19,7 +19,7 @@ class GpsServicePlugin(
 ) : MethodChannel.MethodCallHandler {
 
     companion object {
-        const val CHANNEL = "com.example.absensi_wajah/gps_service"
+        const val CHANNEL = "id.ac.umj.rikoputra.absensiwajah/gps_service"
         const val NOTIF_PERM_CODE = 9001
     }
 

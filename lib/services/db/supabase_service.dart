@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter/foundation.dart';
 
 class SupabaseService {
   static final SupabaseService _instance = SupabaseService._internal();
@@ -59,5 +60,14 @@ class SupabaseService {
         .eq('id', 'SDN_GUBRIH_1')
         .maybeSingle();
     return data;
+  }
+
+  /// Hapus semua embedding wajah milik user yang sedang login.
+  /// Dipakai saat user klik "Hapus Data Wajah".
+  Future<void> deleteMyFaceEmbeddings() async {
+    final user = _client.auth.currentUser;
+    if (user == null) return;
+    await _client.from('face_embeddings').delete().eq('user_id', user.id);
+    debugPrint("SUPABASE: face_embeddings user ${user.id} dihapus");
   }
 }

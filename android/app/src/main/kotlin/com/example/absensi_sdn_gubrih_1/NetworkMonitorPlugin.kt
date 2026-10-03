@@ -1,4 +1,4 @@
-package com.example.absensi_wajah
+package id.ac.umj.rikoputra.absensiwajah
 
 import android.content.Context
 import android.net.ConnectivityManager
@@ -21,7 +21,7 @@ class NetworkMonitorPlugin(
 ) : MethodChannel.MethodCallHandler {
 
     companion object {
-        const val CHANNEL = "com.example.absensi_wajah/network_monitor"
+        const val CHANNEL = "id.ac.umj.rikoputra.absensiwajah/network_monitor"
     }
 
     private val channel = MethodChannel(messenger, CHANNEL).apply {

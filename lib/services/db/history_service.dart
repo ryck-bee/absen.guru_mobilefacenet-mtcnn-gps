@@ -4,11 +4,11 @@ import 'database_service.dart';
 /// Service query + agregasi riwayat absen.
 ///
 /// Menggabungkan:
-///   - attendance_local  → valid, pending, izin, sakit
+///   - attendance_local  → valid, pending, izin, sakit, gagal
 ///   - session_logs_local → hitung gagal per hari + card "gagal murni"
 ///
 /// Aturan: 1 hari = 1 entry. Prioritas menang:
-///   valid > izin > sakit > gagal > pending
+///   VALID > izin/sakit > (nunggu validasi) > pending > REJECTED
 class HistoryService {
   static final HistoryService _instance = HistoryService._internal();
   factory HistoryService() => _instance;
@@ -109,10 +109,13 @@ class HistoryService {
   int _attendanceRank(Map<String, dynamic> row) {
     final isIzin = (row['is_izin'] as int? ?? 0) == 1;
     final syncStatus = row['sync_status'] as String? ?? 'pending';
+    final serverStatus = row['server_status'] as String?;
 
-    if (isIzin) return 2; // izin / sakit
-    if (syncStatus == 'synced') return 1; // valid
-    return 3; // pending absen
+    if (isIzin) return 2;
+    if (serverStatus == 'VALID') return 1;
+    if (serverStatus == 'REJECTED') return 5;
+    if (syncStatus == 'synced') return 3; // nunggu validasi server
+    return 4; // pending lokal
   }
 
   HistoryEntry _buildFromAttendance(
@@ -122,13 +125,19 @@ class HistoryService {
   ) {
     final isIzin = (row['is_izin'] as int? ?? 0) == 1;
     final syncStatus = row['sync_status'] as String? ?? 'pending';
+    final serverStatus = row['server_status'] as String?;
     final izinType = row['izin_type'] as String?;
 
     HistoryStatus status;
     if (isIzin) {
       status = izinType == 'sakit' ? HistoryStatus.sakit : HistoryStatus.izin;
-    } else if (syncStatus == 'synced') {
+    } else if (serverStatus == 'VALID') {
       status = HistoryStatus.valid;
+    } else if (serverStatus == 'REJECTED') {
+      status = HistoryStatus.gagal;
+    } else if (syncStatus == 'synced') {
+      // Sudah dikirim ke server, tapi trigger validasi belum set status.
+      status = HistoryStatus.pending;
     } else {
       status = HistoryStatus.pending;
     }

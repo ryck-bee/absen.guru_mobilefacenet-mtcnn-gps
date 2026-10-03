@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 class GpsServicePlugin {
   GpsServicePlugin._();
   static const _channel =
-      MethodChannel('com.example.absensi_wajah/gps_service');
+      MethodChannel('id.ac.umj.rikoputra.absensiwajah/gps_service');
 
   static Future<bool> startGpsService() async {
     try {

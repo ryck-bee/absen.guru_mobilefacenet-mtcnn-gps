@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 class MockLocation {
   MockLocation._();
   static const _channel =
-      MethodChannel('com.example.absensi_wajah/mock_location');
+      MethodChannel('id.ac.umj.rikoputra.absensiwajah/mock_location');
 
   /// Return true kalau ada mock location aktif.
   static Future<bool> check() async {

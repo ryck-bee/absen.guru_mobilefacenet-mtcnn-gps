@@ -16,6 +16,7 @@ import '../../services/model/mtcnn_service.dart';
 import '../../utils/camera_image_utils.dart';
 import '../../widgets/loading_overlay.dart';
 import '../../widgets/app_spinner.dart';
+import '../../services/db/supabase_service.dart';
 
 enum _CaptureStatus { none, success, failed }
 
@@ -518,9 +519,21 @@ class _FaceEntryScreenState extends State<FaceEntryScreen> {
 
     if (confirm != true) return;
 
+    loadingController.show();
+
+    // 1. Hapus di server.
+    try {
+      await SupabaseService().deleteMyFaceEmbeddings();
+    } catch (e) {
+      debugPrint("FACE ENTRY: hapus server gagal -> $e");
+    }
+
+    // 2. Hapus di lokal.
     MobileFaceNetService().deleteUser(_userId!);
     await DatabaseService.instance.deleteEmbeddingsByUser(_userId!);
     MobileFaceNetService().clearMatchHistory();
+
+    await loadingController.hide();
 
     if (!mounted) return;
     setState(() {

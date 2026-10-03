@@ -14,25 +14,22 @@ class DatabaseService {
 
   Database? _db;
   String? _currentUserId;
-  static const int _dbVersion = 1; // fresh per-user DB
+  static const int _dbVersion = 1;
   static const _uuid = Uuid();
 
   String? get currentUserId => _currentUserId;
 
-  /// Buka DB khusus user ini. Kalau sudah terbuka untuk user yang sama,
-  /// nggak ngapa-ngapain. Kalau beda user, tutup dulu baru buka.
   Future<void> openFor(String userId) async {
     if (_currentUserId == userId && _db != null) return;
     if (_db != null) await close();
 
     _currentUserId = userId;
 
-    // Ambil/generate kunci enkripsi user ini.
     final key = await DbKeyStorage.getOrCreate(userId);
 
     final dbPath = await getDatabasesPath();
     final safeId = userId.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
-    final fullPath = p.join(dbPath, 'absensi_wajah_$safeId.db');
+    final fullPath = p.join(dbPath, 'absensi_sdn_gubrih_1_$safeId.db');
 
     _db = await openDatabase(
       fullPath,
@@ -237,7 +234,6 @@ class DatabaseService {
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // Fresh per-user DB mulai dari v1. Kalau nanti upgrade, tambah di sini.
     debugPrint("DB: Upgrade v$oldVersion -> v$newVersion (per-user)");
   }
 
@@ -694,7 +690,8 @@ class DatabaseService {
 
     final rows = await db.query(
       'attendance_local',
-      where: 'user_id = ? AND recorded_date = ?',
+      where: "user_id = ? AND recorded_date = ? "
+          "AND (sync_status = 'pending' OR server_status = 'VALID')",
       whereArgs: [userId, dateOnly],
       limit: 1,
     );
@@ -728,26 +725,57 @@ class DatabaseService {
     );
   }
 
-  /// True kalau user ini belum punya row apapun. Buat deteksi device baru.
   Future<bool> isUserDataEmpty() async {
     final db = await database;
     final r = await db.rawQuery('SELECT COUNT(*) as c FROM attendance_local');
     return (Sqflite.firstIntValue(r) ?? 0) == 0;
   }
 
+  String? _toLocal(String? iso) {
+    if (iso == null) return null;
+    final dt = DateTime.tryParse(iso);
+    if (dt == null) return iso;
+    return dt.toLocal().toIso8601String();
+  }
+
   /// Insert attendance hasil pull dari server.
-  /// Skip kalau client_uuid sudah ada.
+  /// Kalau row sudah ada (client_uuid sama), update status server-nya saja.
   Future<void> insertAttendanceFromServer(Map<String, dynamic> row) async {
     final db = await database;
+    final clientUuid = row['client_uuid'] as String?;
+    if (clientUuid == null) return;
+
+    final existing = await db.query(
+      'attendance_local',
+      columns: ['id'],
+      where: 'client_uuid = ?',
+      whereArgs: [clientUuid],
+      limit: 1,
+    );
+
+    if (existing.isNotEmpty) {
+      await db.update(
+        'attendance_local',
+        {
+          'server_status': row['status'],
+          'reject_reason': row['reject_reason'],
+          'validated_at': _toLocal(row['validated_at'] as String?),
+        },
+        where: 'client_uuid = ?',
+        whereArgs: [clientUuid],
+      );
+      return;
+    }
+
     await db.insert(
       'attendance_local',
       {
-        'client_uuid': row['client_uuid'],
+        'client_uuid': clientUuid,
         'session_uuid': row['session_uuid'],
         'user_id': row['user_id'],
-        'recorded_at': row['recorded_at'],
+        'recorded_at': _toLocal(row['recorded_at'] as String?),
         'recorded_date': row['recorded_date'],
-        'local_timestamp': row['local_timestamp'],
+        'local_timestamp': _toLocal(row['local_timestamp'] as String?),
         'lat': row['lat'],
         'lng': row['lng'],
         'distance_meters': row['distance_meters'],
@@ -761,15 +789,13 @@ class DatabaseService {
         'photo_url': row['photo_url'],
         'server_status': row['status'],
         'reject_reason': row['reject_reason'],
-        'validated_at': row['validated_at'],
+        'validated_at': _toLocal(row['validated_at'] as String?),
         'sync_status': 'synced',
         'synced_at': DateTime.now().toIso8601String(),
       },
-      conflictAlgorithm: ConflictAlgorithm.ignore,
     );
   }
 
-  /// Update status dari server (kalau device ini pernah push, lalu server validasi).
   Future<void> updateAttendanceServerStatus(
     String clientUuid, {
     required String status,
@@ -878,8 +904,6 @@ class DatabaseService {
     return totalDeleted;
   }
 
-  /// Reset semua data user saat ini. TIDAK dipanggil saat logout.
-  /// Hanya untuk fitur "reset data" manual di menu pengaturan (kalau ada).
   Future<void> resetCurrentUserData() async {
     final db = await database;
     await db.delete('users_local');

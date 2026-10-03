@@ -1,4 +1,4 @@
-package com.example.absensi_wajah
+package id.ac.umj.rikoputra.absensiwajah
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine

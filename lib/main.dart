@@ -1,4 +1,4 @@
-import 'package:absensi_wajah/services/monotonic_clock.dart';
+import 'package:absensi_sdn_gubrih_1/services/monotonic_clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -121,7 +121,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return _LogLifecycle(
       child: MaterialApp(
-        title: 'Absensi Wajah',
+        title: 'Absensi SDN Gubrih 1',
         debugShowCheckedModeBanner: false,
         color: AppColors.cream,
         theme: ThemeData(

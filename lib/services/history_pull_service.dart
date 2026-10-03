@@ -25,8 +25,15 @@ class HistoryPullService {
   bool _isPulling = false;
   bool get isPulling => _isPulling;
 
+  /// Konversi ISO dari server (UTC) ke waktu lokal device.
+  String? _toLocal(String? iso) {
+    if (iso == null) return null;
+    final dt = DateTime.tryParse(iso);
+    if (dt == null) return iso;
+    return dt.toLocal().toIso8601String();
+  }
+
   /// Pull attendance + session_logs + foto.
-  /// Return true kalau berhasil (atau skip karena data sudah ada).
   Future<bool> pullForUser(String userId) async {
     if (_isPulling) return false;
     _isPulling = true;
@@ -48,7 +55,7 @@ class HistoryPullService {
         );
       }
 
-      // 2. SESSION_LOGS — server → lokal (buat failed count per hari).
+      // 2. SESSION_LOGS — server → lokal.
       final sessionRows = await _client
           .from('session_logs')
           .select()
@@ -59,13 +66,16 @@ class HistoryPullService {
       debugPrint("PULL: ${sessionRows.length} session_logs dari server");
 
       for (final row in sessionRows) {
-        await _insertSessionLogFromServer(userId, Map<String, dynamic>.from(row as Map));
+        await _insertSessionLogFromServer(
+          userId,
+          Map<String, dynamic>.from(row as Map),
+        );
       }
 
-      // 3. FOTO — download 7 attendance terbaru yang punya photo_url.
+      // 3. FOTO — 7 attendance terbaru.
       await _downloadRecentPhotos(userId, attendanceRows);
 
-      // 4. RETENSI — enforce FIFO 7 + bersihkan file non-attendance.
+      // 4. RETENSI.
       await PhotoRetentionService().enforce(userId);
       await PhotoRetentionService().cleanupNonAttendanceFiles(userId);
 
@@ -90,23 +100,23 @@ class HistoryPullService {
         'client_uuid': row['client_uuid'],
         'user_id': userId,
         'session_type': row['session_type'],
-        'started_at': row['started_at'],
-        'camera_ready_at': row['camera_ready_at'],
-        'first_face_at': row['first_face_at'],
+        'started_at': _toLocal(row['started_at'] as String?),
+        'camera_ready_at': _toLocal(row['camera_ready_at'] as String?),
+        'first_face_at': _toLocal(row['first_face_at'] as String?),
         'mtcnn_ms_first': row['mtcnn_ms_first'],
         'mfn_ms_first': row['mfn_ms_first'],
         'match_ms_first': row['match_ms_first'],
         'mtcnn_ms_final': row['mtcnn_ms_final'],
         'mfn_ms_final': row['mfn_ms_final'],
         'match_ms_final': row['match_ms_final'],
-        'face_valid_at': row['face_valid_at'],
+        'face_valid_at': _toLocal(row['face_valid_at'] as String?),
         'failed_count': row['failed_count'] ?? 0,
-        'gps_start_at': row['gps_start_at'],
-        'gps_done_at': row['gps_done_at'],
+        'gps_start_at': _toLocal(row['gps_start_at'] as String?),
+        'gps_done_at': _toLocal(row['gps_done_at'] as String?),
         'gps_result': row['gps_result'],
         'gps_ms': row['gps_ms'],
         'final_status': row['final_status'],
-        'final_at': row['final_at'],
+        'final_at': _toLocal(row['final_at'] as String?),
         'photo_path': null,
         'raw_photo_path': null,
         'photo_url': row['photo_url'],

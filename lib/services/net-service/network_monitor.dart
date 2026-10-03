@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 /// Tidak cek internet; itu tugas Dart (ping Supabase).
 class NetworkMonitor {
   NetworkMonitor._();
-  static const _channel = MethodChannel('com.example.absensi_wajah/network_monitor');
+  static const _channel = MethodChannel('id.ac.umj.rikoputra.absensiwajah/network_monitor');
 
   static Future<void> start() async {
     try {

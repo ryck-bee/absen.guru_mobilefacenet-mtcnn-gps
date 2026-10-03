@@ -1,4 +1,4 @@
-package com.example.absensi_wajah
+package id.ac.umj.rikoputra.absensiwajah
 
 import android.os.SystemClock
 import io.flutter.plugin.common.BinaryMessenger
@@ -14,7 +14,7 @@ class MonotonicClockPlugin(
 ) : MethodChannel.MethodCallHandler {
 
     companion object {
-        const val CHANNEL = "com.example.absensi_wajah/monotonic_clock"
+        const val CHANNEL = "id.ac.umj.rikoputra.absensiwajah/monotonic_clock"
     }
 
     private val channel = MethodChannel(messenger, CHANNEL).apply {

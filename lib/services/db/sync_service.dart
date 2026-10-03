@@ -74,6 +74,15 @@ class SyncService {
   bool? _lastReachableResult;
   static const _reachableCacheDuration = Duration(seconds: 5);
 
+  /// Konversi ISO string dari DB lokal (WIB, tanpa TZ) ke UTC.
+  /// Kalau sudah ada TZ info, tidak double-convert.
+  String? _toUtc(String? iso) {
+    if (iso == null) return null;
+    final dt = DateTime.tryParse(iso);
+    if (dt == null) return iso;
+    return dt.toUtc().toIso8601String();
+  }
+
   /// Pastikan device terdaftar di Supabase. Insert/upsert sekali.
   /// Return device UUID yang siap dipakai sebagai `device_id`.
   Future<void> _ensureDeviceRegistered(String userId) async {
@@ -237,7 +246,8 @@ class SyncService {
       }
 
       // === 2. SESSION LOGS ===
-      final pendingSession = await DatabaseService.instance.getPendingSessionLogs();
+      final pendingSession =
+          await DatabaseService.instance.getPendingSessionLogs();
       debugPrint("SYNC: ${pendingSession.length} session log pending");
       for (final row in pendingSession) {
         String? photoUrl = row['photo_url'] as String?;
@@ -247,7 +257,8 @@ class SyncService {
         final sessionUuid = row['client_uuid'] as String?;
 
         if (photoPath != null && sessionUuid != null && photoUrl == null) {
-          final uploaded = await _uploadPhoto(photoPath, userId, sessionUuid, 'session');
+          final uploaded =
+              await _uploadPhoto(photoPath, userId, sessionUuid, 'session');
           if (uploaded != null) {
             photoUrl = uploaded;
             photoOk++;
@@ -256,8 +267,11 @@ class SyncService {
           }
         }
 
-        if (rawPhotoPath != null && sessionUuid != null && rawPhotoUrl == null) {
-          final uploaded = await _uploadPhoto(rawPhotoPath, userId, sessionUuid, 'raw');
+        if (rawPhotoPath != null &&
+            sessionUuid != null &&
+            rawPhotoUrl == null) {
+          final uploaded =
+              await _uploadPhoto(rawPhotoPath, userId, sessionUuid, 'raw');
           if (uploaded != null) {
             rawPhotoUrl = uploaded;
             photoOk++;
@@ -279,7 +293,8 @@ class SyncService {
       }
 
       // === 3. FACE ATTEMPTS ===
-      final pendingFace = await DatabaseService.instance.getPendingFaceAttempts();
+      final pendingFace =
+          await DatabaseService.instance.getPendingFaceAttempts();
       debugPrint("SYNC: ${pendingFace.length} face attempt pending");
       for (final row in pendingFace) {
         if (await _uploadFaceAttempt(row)) {
@@ -311,7 +326,8 @@ class SyncService {
         final clientUuid = row['client_uuid'] as String?;
 
         if (photoPath != null && clientUuid != null && photoUrl == null) {
-          final uploaded = await _uploadPhoto(photoPath, userId, clientUuid, 'attendance');
+          final uploaded =
+              await _uploadPhoto(photoPath, userId, clientUuid, 'attendance');
           if (uploaded != null) {
             photoUrl = uploaded;
             photoOk++;
@@ -335,10 +351,8 @@ class SyncService {
       await _updateAnchor(userId);
 
       // === 7. RETENSI FOTO ===
-      // Cuma kalau sync nggak ada error (biar nggak hapus foto pending).
       await PhotoRetentionService().enforce(userId);
       await PhotoRetentionService().cleanupNonAttendanceFiles(userId);
-
     } catch (e) {
       debugPrint("SYNC ERROR: $e");
     } finally {
@@ -379,7 +393,7 @@ class SyncService {
         'user_id': row['user_id'],
         'mode': row['mode'],
         'embedding': jsonDecode(row['embedding'] as String),
-        'created_at': row['created_at'],
+        'created_at': _toUtc(row['created_at'] as String?),
         'device_id': _deviceIdOrNull,
       });
       return true;
@@ -393,7 +407,8 @@ class SyncService {
     }
   }
 
-  Future<bool> _uploadSessionLog(Map<String, dynamic> row, String? photoUrl, String? rawPhotoUrl) async {
+  Future<bool> _uploadSessionLog(
+      Map<String, dynamic> row, String? photoUrl, String? rawPhotoUrl) async {
     final clientUuid = row['client_uuid'] as String?;
     if (clientUuid == null) return true;
 
@@ -402,23 +417,23 @@ class SyncService {
         'client_uuid': clientUuid,
         'user_id': row['user_id'],
         'session_type': row['session_type'],
-        'started_at': row['started_at'],
-        'camera_ready_at': row['camera_ready_at'],
-        'first_face_at': row['first_face_at'],
+        'started_at': _toUtc(row['started_at'] as String?),
+        'camera_ready_at': _toUtc(row['camera_ready_at'] as String?),
+        'first_face_at': _toUtc(row['first_face_at'] as String?),
         'mtcnn_ms_first': row['mtcnn_ms_first'],
         'mfn_ms_first': row['mfn_ms_first'],
         'match_ms_first': row['match_ms_first'],
         'mtcnn_ms_final': row['mtcnn_ms_final'],
         'mfn_ms_final': row['mfn_ms_final'],
         'match_ms_final': row['match_ms_final'],
-        'face_valid_at': row['face_valid_at'],
+        'face_valid_at': _toUtc(row['face_valid_at'] as String?),
         'failed_count': row['failed_count'],
-        'gps_start_at': row['gps_start_at'],
-        'gps_done_at': row['gps_done_at'],
+        'gps_start_at': _toUtc(row['gps_start_at'] as String?),
+        'gps_done_at': _toUtc(row['gps_done_at'] as String?),
         'gps_result': row['gps_result'],
         'gps_ms': row['gps_ms'],
         'final_status': row['final_status'],
-        'final_at': row['final_at'],
+        'final_at': _toUtc(row['final_at'] as String?),
         'photo_url': photoUrl,
         'raw_photo_url': rawPhotoUrl,
         'device_uptime_ms': row['device_uptime_ms'],
@@ -450,7 +465,7 @@ class SyncService {
         'session_uuid': row['session_uuid'],
         'user_id': row['user_id'],
         'attempt_number': row['attempt_number'],
-        'attempted_at': row['attempted_at'],
+        'attempted_at': _toUtc(row['attempted_at'] as String?),
         'mtcnn_status': row['mtcnn_status'],
         'mtcnn_ms': row['mtcnn_ms'],
         'mfn_status': row['mfn_status'],
@@ -480,8 +495,8 @@ class SyncService {
         'session_uuid': row['session_uuid'],
         'user_id': row['user_id'],
         'attempt_number': row['attempt_number'],
-        'started_at': row['started_at'],
-        'done_at': row['done_at'],
+        'started_at': _toUtc(row['started_at'] as String?),
+        'done_at': _toUtc(row['done_at'] as String?),
         'result': row['result'],
         'lat': row['lat'],
         'lng': row['lng'],
@@ -501,7 +516,8 @@ class SyncService {
     }
   }
 
-  Future<bool> _uploadAttendance(Map<String, dynamic> row, String? photoUrl) async {
+  Future<bool> _uploadAttendance(
+      Map<String, dynamic> row, String? photoUrl) async {
     final clientUuid = row['client_uuid'] as String?;
     if (clientUuid == null) return true;
 
@@ -509,9 +525,9 @@ class SyncService {
       await _client.from('attendance').insert({
         'client_uuid': clientUuid,
         'user_id': row['user_id'],
-        'recorded_at': row['recorded_at'],
+        'recorded_at': _toUtc(row['recorded_at'] as String?),
         'recorded_date': row['recorded_date'],
-        'local_timestamp': row['local_timestamp'],
+        'local_timestamp': _toUtc(row['local_timestamp'] as String?),
         'lat': row['lat'],
         'lng': row['lng'],
         'distance_meters': row['distance_meters'],
@@ -524,6 +540,27 @@ class SyncService {
         'photo_url': photoUrl,
         'device_id': _deviceIdOrNull,
       });
+
+      // Ambil balik status dari server (trigger BEFORE INSERT sudah set).
+      try {
+        final serverRow = await _client
+            .from('attendance')
+            .select('status, reject_reason, validated_at')
+            .eq('client_uuid', clientUuid)
+            .maybeSingle();
+
+        if (serverRow != null) {
+          await DatabaseService.instance.updateAttendanceServerStatus(
+            clientUuid,
+            status: (serverRow['status'] as String?) ?? 'PENDING',
+            rejectReason: serverRow['reject_reason'] as String?,
+            validatedAt: serverRow['validated_at'] as String?,
+          );
+        }
+      } catch (e) {
+        debugPrint("SYNC: fetch status server gagal -> $e");
+      }
+
       return true;
     } on PostgrestException catch (e) {
       if (e.code == '23505') return true;
@@ -554,7 +591,8 @@ class SyncService {
       await _client.storage.from(_photoBucket).uploadBinary(
         storagePath,
         bytes,
-        fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: true),
+        fileOptions:
+            const FileOptions(contentType: 'image/jpeg', upsert: true),
       );
 
       return storagePath;

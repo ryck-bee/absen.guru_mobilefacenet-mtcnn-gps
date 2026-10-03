@@ -105,6 +105,22 @@ class DebugLogger {
     }
   }
 
+  /// Ambil 500 baris terakhir dari log file untuk diupload.
+  Future<String> getRecentContent({int maxLines = 500}) async {
+    await _flush();
+    if (_logFile == null) return '';
+    try {
+      if (!await _logFile!.exists()) return '';
+      final lines = await _logFile!.readAsLines();
+      if (lines.isEmpty) return '';
+      final start = lines.length > maxLines ? lines.length - maxLines : 0;
+      return lines.sublist(start).join('\n');
+    } catch (e) {
+      debugPrintSynchronously('DebugLogger getRecentContent error: $e');
+      return '';
+    }
+  }
+
   Future<File?> getLearningFile() async {
     await _ensureLearningFile();
     return _learningFile;

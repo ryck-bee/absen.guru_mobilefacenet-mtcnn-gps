@@ -350,6 +350,9 @@ class _AuthRouterState extends State<AuthRouter> {
         debugPrint("AUTH ROUTER: auto-pull error -> $e");
       }
 
+      // 4. Upload debug log (maks 1x/hari).
+      SyncService().uploadDebugLogDaily(userId).catchError((_) {});
+
       // Refresh notif pengingat absen.
       NotifService.instance.refreshForUser(userId).catchError((_) {});
 

@@ -2,10 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'database_service.dart';
 import '../photo_retention_service.dart';
 import '../device_storage.dart';
 import '../monotonic_clock.dart';
+import '../debug_logger.dart';
 import '../../main.dart';
 
 class SyncResult {
@@ -649,6 +651,41 @@ class SyncService {
       _lastReachableCheck = DateTime.now();
       _lastReachableResult = false;
       return false;
+    }
+  }
+
+  /// Upload log lokal ke Supabase, maksimal 1x per hari per device.
+  Future<void> uploadDebugLogDaily(String userId) async {
+    final storage = FlutterSecureStorage();
+    const key = 'debug_log_last_upload_date';
+
+    final now = DateTime.now();
+    final today = '${now.year.toString().padLeft(4, '0')}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+
+    try {
+      final last = await storage.read(key: key);
+      if (last == today) return;
+
+      final content = await DebugLogger.instance.getRecentContent(maxLines: 500);
+      if (content.isEmpty) return;
+
+      await _client.from('debug_logs').insert({
+        'user_id': userId,
+        'log_type': 'daily_snapshot',
+        'content': {'raw': content},
+        'device_info': {
+          'model': gDeviceModel,
+          'brand': gDeviceBrand,
+          'android_version': gDeviceAndroid,
+        },
+      });
+
+      await storage.write(key: key, value: today);
+      debugPrint("SYNC: debug log diupload (${content.length} chars)");
+    } catch (e) {
+      debugPrint("SYNC: upload debug log gagal -> $e");
     }
   }
 }

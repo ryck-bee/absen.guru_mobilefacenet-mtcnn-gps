@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../config/app_colors.dart';
 import '../config/app_spacing.dart';
@@ -73,6 +74,8 @@ class _LoginScreenState extends State<LoginScreen> {
         identifier: _nipController.text,
         password: _pwController.text,
       );
+      // Login sukses → trigger dialog "Simpan password?" di Android
+      TextInput.finishAutofillContext();
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -137,53 +140,57 @@ class _LoginScreenState extends State<LoginScreen> {
                 padding: EdgeInsets.fromLTRB(gutter, 24, gutter, 24),
                 child: Center(
                   child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        if (_error && _errorMessage != null) ...[
-                          Text(
-                            _errorMessage!,
+                    child: AutofillGroup(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (_error && _errorMessage != null) ...[
+                            Text(
+                              _errorMessage!,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: AppColors.error,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                          ],
+                          const Text(
+                            'Selamat Datang!',
                             textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: AppColors.error,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
+                            style: TextStyle(
+                              fontSize: 34,
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.darkSlate,
+                              height: 1.15,
                             ),
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Silahkan masukkan NIP dan password\nyang sudah di sediakan!',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: AppColors.darkSlate.withValues(alpha: 0.7),
+                              height: 1.4,
+                            ),
+                          ),
+                          const SizedBox(height: 56),
+                          _buildField(
+                            controller: _nipController,
+                            label: 'NIP',
+                            error: _error,
+                            autofillHints: const [AutofillHints.username],
+                            textInputAction: TextInputAction.next,
+                          ),
+                          const SizedBox(height: 28),
+                          _buildPasswordField(),
+                          const SizedBox(height: 40),
+                          _buildPermissionState(),
                         ],
-                        const Text(
-                          'Selamat Datang!',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 34,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.darkSlate,
-                            height: 1.15,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          'Silahkan masukkan NIP dan password\nyang sudah di sediakan!',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: AppColors.darkSlate.withValues(alpha: 0.7),
-                            height: 1.4,
-                          ),
-                        ),
-                        const SizedBox(height: 56),
-                        _buildField(
-                          controller: _nipController,
-                          label: 'NIP',
-                          error: _error,
-                        ),
-                        const SizedBox(height: 28),
-                        _buildPasswordField(),
-                        const SizedBox(height: 40),
-                        _buildPermissionState(),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -202,6 +209,8 @@ class _LoginScreenState extends State<LoginScreen> {
       controller: _pwController,
       obscureText: _obscurePw,
       enabled: !_loading,
+      autofillHints: const [AutofillHints.password],
+      textInputAction: TextInputAction.done,
       onSubmitted: (_) => _login(),
       style: const TextStyle(
         color: AppColors.darkSlate,
@@ -363,6 +372,8 @@ class _LoginScreenState extends State<LoginScreen> {
     bool obscure = false,
     bool error = false,
     ValueChanged<String>? onSubmitted,
+    Iterable<String>? autofillHints,
+    TextInputAction? textInputAction,
   }) {
     final lineColor = error ? AppColors.error : AppColors.darkSlate;
 
@@ -371,6 +382,8 @@ class _LoginScreenState extends State<LoginScreen> {
       obscureText: obscure,
       enabled: !_loading,
       onSubmitted: onSubmitted,
+      autofillHints: autofillHints,
+      textInputAction: textInputAction,
       style: const TextStyle(
         color: AppColors.darkSlate,
         fontSize: 16,
